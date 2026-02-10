@@ -1,0 +1,32 @@
+# Binaries
+compare
+gwebp
+*.test
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test output
+*.webp
+!testdata/*.webp
+
+# Go build cache
+*.o
+*.a
+*.out
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+libwebp/
+testc/libwebp/
