@@ -45,6 +45,10 @@ func TestEncodeNoiseSizes(t *testing.T) {
 				os.WriteFile(fname, riff, 0644)
 				fmt.Printf("Encoded %s: %d bytes\n", name, len(riff))
 
+				if _, lookErr := exec.LookPath("dwebp"); lookErr != nil {
+					t.Log("dwebp not found, skipping verification")
+					return
+				}
 				cmd := exec.Command("dwebp", fname, "-pam", "-o", fname+".pam")
 				out, dErr := cmd.CombinedOutput()
 				if dErr != nil {

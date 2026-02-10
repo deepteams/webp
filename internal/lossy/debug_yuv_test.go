@@ -45,19 +45,21 @@ func TestDebugUVPipeline(t *testing.T) {
 	tmpFile := "/tmp/test_red16.webp"
 	os.WriteFile(tmpFile, riff, 0644)
 
-	// Try dwebp to decode.
-	dwebpOut := "/tmp/test_red16_dwebp.pam"
-	cmd := exec.Command("dwebp", tmpFile, "-pam", "-o", dwebpOut)
-	out, dwebpErr := cmd.CombinedOutput()
-	if dwebpErr != nil {
-		fmt.Printf("dwebp error: %v\nOutput: %s\n", dwebpErr, string(out))
+	// Try dwebp to decode (skip if not installed).
+	if _, lookErr := exec.LookPath("dwebp"); lookErr != nil {
+		t.Log("dwebp not found, skipping dwebp verification")
 	} else {
-		fmt.Printf("dwebp decoded successfully to %s\n", dwebpOut)
-		// Read PAM to check pixel values.
-		pam, _ := os.ReadFile(dwebpOut)
-		if len(pam) > 0 {
-			// PAM has a text header then binary data. Find the first pixel.
-			fmt.Printf("dwebp PAM first 200 bytes: %q\n", string(pam[:min(200, len(pam))]))
+		dwebpOut := "/tmp/test_red16_dwebp.pam"
+		cmd := exec.Command("dwebp", tmpFile, "-pam", "-o", dwebpOut)
+		out, dwebpErr := cmd.CombinedOutput()
+		if dwebpErr != nil {
+			fmt.Printf("dwebp error: %v\nOutput: %s\n", dwebpErr, string(out))
+		} else {
+			fmt.Printf("dwebp decoded successfully to %s\n", dwebpOut)
+			pam, _ := os.ReadFile(dwebpOut)
+			if len(pam) > 0 {
+				fmt.Printf("dwebp PAM first 200 bytes: %q\n", string(pam[:min(200, len(pam))]))
+			}
 		}
 	}
 
