@@ -367,7 +367,7 @@ func TestEncodeLossy_WithAlpha_VP8XContainer(t *testing.T) {
 	}
 
 	// Verify VP8X has alpha flag set (bit 4 = 0x10).
-	vp8xFlags := data[20] | data[21]<<8 | data[22]<<16 | data[23]<<24
+	vp8xFlags := uint32(data[20]) | uint32(data[21])<<8 | uint32(data[22])<<16 | uint32(data[23])<<24
 	if vp8xFlags&0x10 == 0 {
 		t.Errorf("VP8X alpha flag not set: flags = 0x%08x", vp8xFlags)
 	}
