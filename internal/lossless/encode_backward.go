@@ -633,7 +633,6 @@ func GetBackwardReferences(
 	// step, after all LZ77 cost comparisons are done with raw distances.
 	BackwardReferences2DLocality(width, best)
 
-	_ = bestCost
 	return bestCacheBits
 }
 

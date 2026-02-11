@@ -401,12 +401,10 @@ func parseFrameSubChunks(frame FrameInfo, buf []byte) (FrameInfo, error) {
 			if alphPayload != nil {
 				return FrameInfo{}, ErrInvalidChunk
 			}
-			w, h, alpha, err := parseVP8LHeader(payload)
+			_, _, alpha, err := parseVP8LHeader(payload)
 			if err != nil {
 				return FrameInfo{}, err
 			}
-			_ = w
-			_ = h
 			frame.IsLossless = true
 			if alpha {
 				frame.HasAlpha = true

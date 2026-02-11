@@ -1318,11 +1318,6 @@ func (enc *VP8Encoder) statLoop() {
 		numPasses = 10
 	}
 
-	// Fast probe: for method 0 or 3 without size/PSNR search, only analyze a
-	// fraction of the MBs (matching C's fast_probe logic).
-	doSearch := enc.config.TargetSize > 0 || enc.config.TargetPSNR > 0
-	_ = (enc.config.Method == 0 || enc.config.Method == 3) && !doSearch
-
 	for pass := 0; pass < numPasses; pass++ {
 		// Run a full encode pass to fill mbInfo with mode decisions and coefficients.
 		// Skip token recording and plane write-back to preserve source pixel data.
@@ -1523,18 +1518,6 @@ func (enc *VP8Encoder) restoreSourcePixels() {
 // computeStats computes encoding statistics after a frame has been encoded.
 func (enc *VP8Encoder) computeStats(frameData []byte) {
 	enc.stats.CodedSize = len(frameData)
-
-	// Compute PSNR for Y, U, V, and global.
-	yPixels := enc.width * enc.height
-	uvPixels := (enc.width / 2) * (enc.height / 2)
-
-	// For PSNR, we compare original source (yPlane/uPlane/vPlane has been
-	// overwritten by reconstruction during Export). We can still report
-	// the coded size which is most useful for rate control.
-	// PSNR computation requires original pixels which are lost after Export.
-	// Leave PSNR at 0 for now; rate control uses CodedSize.
-	_ = yPixels
-	_ = uvPixels
 }
 
 // Stats returns the current encoding statistics.

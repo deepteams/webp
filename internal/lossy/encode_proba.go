@@ -29,12 +29,9 @@ func collectCoeffStats(coeffs []int16, nCoeffs int, ctxType int, proba *Proba, f
 
 		for {
 			v := int(coeffs[KZigzag[n]])
-			sign := 0
 			if v < 0 {
 				v = -v
-				sign = 1
 			}
-			_ = sign
 
 			b = int(KBands[n])
 
