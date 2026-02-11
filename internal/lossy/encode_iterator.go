@@ -43,12 +43,12 @@ func (enc *VP8Encoder) InitIterator() {
 	it.Y = 0
 	it.MBIdx = 0
 
-	// Allocate context arrays.
-	it.topY = make([]uint8, enc.mbW*16)
-	it.topU = make([]uint8, enc.mbW*8)
-	it.topV = make([]uint8, enc.mbW*8)
-	it.topModes = make([]uint8, enc.mbW*4)
-	it.topNZ = make([]uint32, enc.mbW)
+	// Use pre-allocated context arrays from the encoder.
+	it.topY = enc.itTopY
+	it.topU = enc.itTopU
+	it.topV = enc.itTopV
+	it.topModes = enc.itTopModes
+	it.topNZ = enc.itTopNZ
 
 	// Initialize top context to 127 (DC prediction neutral) and modes to DC.
 	for i := range it.topY {

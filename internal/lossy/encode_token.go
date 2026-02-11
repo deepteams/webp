@@ -3,7 +3,9 @@ package lossy
 import "github.com/deepteams/webp/internal/bitio"
 
 // tokenPageSize is the number of tokens per page in the TokenBuffer.
-const tokenPageSize = 8192
+// Larger pages reduce allocation frequency. A typical 640x480 Q75 encode
+// produces ~200k tokens; 32768 tokens/page means ~6 pages vs ~24 at 8192.
+const tokenPageSize = 32768
 
 // Token represents a single symbol in the VP8 coefficient bitstream.
 type Token struct {

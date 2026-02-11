@@ -10,6 +10,39 @@ import (
 	"github.com/deepteams/webp/internal/dsp"
 )
 
+// importUVWorker holds pre-allocated buffers for UV conversion goroutines.
+type importUVWorker struct {
+	rowR, rowG, rowB, rowA [2][]uint8
+	planarR, planarG       []uint8
+	planarB, planarA       []uint8
+	tmpRGB                 []uint16
+}
+
+
+var importUVWorkerPool sync.Pool
+
+func getImportUVWorker(padW, uvWidth int) *importUVWorker {
+	if v := importUVWorkerPool.Get(); v != nil {
+		wk := v.(*importUVWorker)
+		if cap(wk.rowR[0]) >= padW && cap(wk.tmpRGB) >= uvWidth*4 {
+			return wk
+		}
+	}
+	wk := &importUVWorker{}
+	for i := 0; i < 2; i++ {
+		wk.rowR[i] = make([]uint8, padW)
+		wk.rowG[i] = make([]uint8, padW)
+		wk.rowB[i] = make([]uint8, padW)
+		wk.rowA[i] = make([]uint8, padW)
+	}
+	wk.planarR = make([]uint8, padW*2)
+	wk.planarG = make([]uint8, padW*2)
+	wk.planarB = make([]uint8, padW*2)
+	wk.planarA = make([]uint8, padW*2)
+	wk.tmpRGB = make([]uint16, uvWidth*4)
+	return wk
+}
+
 // EncodeConfig holds VP8 encoding parameters.
 type EncodeConfig struct {
 	Quality    int  // 0-100, maps to quantizer.
@@ -184,6 +217,17 @@ type VP8Encoder struct {
 	// yPlane/uPlane/vPlane. Used by statLoop to avoid destroying source pixel data,
 	// eliminating the need for saveSourcePixels/restoreSourcePixels.
 	skipExportPlanes bool
+
+	// Pre-allocated iterator context arrays (avoid per-InitIterator allocs).
+	itTopY     []uint8
+	itTopU     []uint8
+	itTopV     []uint8
+	itTopModes []uint8
+	itTopNZ    []uint32
+
+	// Pre-allocated analysis buffers (avoid per-analysis allocs).
+	analysisAlphas []int
+	segMapTmp      []uint8
 }
 
 // MBEncInfo stores per-macroblock encoding decisions.
@@ -322,18 +366,93 @@ func storeMaxDelta(dqm *SegmentInfo, dcs [16]int16) {
 	}
 }
 
+var encoderPool sync.Pool
+
+// ReleaseEncoder returns an encoder to the pool for reuse.
+// Must be called after EncodeFrame when the encoder is no longer needed.
+func ReleaseEncoder(enc *VP8Encoder) {
+	if enc != nil {
+		encoderPool.Put(enc)
+	}
+}
+
+// resetForReuse clears mutable state so a pooled encoder can be reused.
+// The caller must have verified that mbW and mbH match.
+func (enc *VP8Encoder) resetForReuse(cfg EncodeConfig, width, height int) {
+	enc.config = cfg
+	enc.width = width
+	enc.height = height
+	// mbW, mbH unchanged (verified by caller).
+
+	enc.numParts = 1 << uint(cfg.Partitions)
+	if enc.numParts > MaxNumPartitions {
+		enc.numParts = MaxNumPartitions
+	}
+
+	// Clear mutable encoding state.
+	enc.leftNz = 0
+	enc.leftNzDC = 0
+	enc.leftDerr = [2][2]int8{}
+	enc.useDerr = cfg.Method >= 3
+	enc.dqY1DC = 0
+	enc.dqY2DC = 0
+	enc.dqY2AC = 0
+	enc.dqUVDC = 0
+	enc.dqUVAC = 0
+	enc.globalAlpha = 0
+	enc.globalUVAlpha = 0
+	enc.baseQuant = 0
+	enc.numSegments = 0
+	enc.skipProba = 0
+	enc.numSkip = 0
+	enc.maxI4HeaderBits = 0
+	enc.rateCtrl = nil
+	enc.nzCounts = [NumMBSegments][9]int{}
+	enc.stats = EncStats{}
+	enc.filterHdr = FilterHeader{}
+	enc.segmentHdr = SegmentHeader{}
+	enc.skipTokens = false
+	enc.skipExportPlanes = false
+	enc.parallelRS = nil
+	enc.savedY = nil
+	enc.savedU = nil
+	enc.savedV = nil
+	enc.tmpBestNz = 0
+
+	// Clear topDerr (already allocated).
+	for i := range enc.topDerr {
+		enc.topDerr[i] = [2][2]int8{}
+	}
+}
+
 // NewEncoder creates and initializes a VP8 encoder from an NRGBA image.
 func NewEncoder(img image.Image, cfg EncodeConfig) *VP8Encoder {
 	bounds := img.Bounds()
 	w := bounds.Dx()
 	h := bounds.Dy()
+	mbW := (w + 15) >> 4
+	mbH := (h + 15) >> 4
+
+	// Try to reuse a pooled encoder with matching dimensions.
+	if v := encoderPool.Get(); v != nil {
+		enc := v.(*VP8Encoder)
+		if enc.mbW == mbW && enc.mbH == mbH {
+			enc.resetForReuse(cfg, w, h)
+			enc.importImage(img)
+			enc.initSegments()
+			enc.initEncoderParams()
+			ResetProba(&enc.proba)
+			enc.tokens.Reset()
+			return enc
+		}
+	}
 
 	enc := &VP8Encoder{
 		config: cfg,
 		width:  w,
 		height: h,
-		mbW:    (w + 15) >> 4,
-		mbH:    (h + 15) >> 4,
+		mbW:    mbW,
+		mbH:    mbH,
 	}
 
 	enc.numParts = 1 << uint(cfg.Partitions)
@@ -356,12 +475,29 @@ func NewEncoder(img image.Image, cfg EncodeConfig) *VP8Encoder {
 // bypassing the standard importImage RGB-to-YUV pipeline.
 // The yuv image must use YCbCrSubsampleRatio420.
 func NewEncoderFromYUV(yuv *image.YCbCr, width, height int, cfg EncodeConfig) *VP8Encoder {
+	mbW := (width + 15) >> 4
+	mbH := (height + 15) >> 4
+
+	// Try to reuse a pooled encoder with matching dimensions.
+	if v := encoderPool.Get(); v != nil {
+		enc := v.(*VP8Encoder)
+		if enc.mbW == mbW && enc.mbH == mbH {
+			enc.resetForReuse(cfg, width, height)
+			enc.importYCbCr(yuv)
+			enc.initSegments()
+			enc.initEncoderParams()
+			ResetProba(&enc.proba)
+			enc.tokens.Reset()
+			return enc
+		}
+	}
+
 	enc := &VP8Encoder{
 		config: cfg,
 		width:  width,
 		height: height,
-		mbW:    (width + 15) >> 4,
-		mbH:    (height + 15) >> 4,
+		mbW:    mbW,
+		mbH:    mbH,
 	}
 
 	enc.numParts = 1 << uint(cfg.Partitions)
@@ -426,40 +562,57 @@ func (enc *VP8Encoder) importYCbCr(yuv *image.YCbCr) {
 }
 
 // allocateBuffers pre-allocates all working memory.
+// Consolidates multiple small allocations into larger slabs to reduce alloc count.
 func (enc *VP8Encoder) allocateBuffers() {
 	mbW := enc.mbW
 	mbH := enc.mbH
 	totalMB := mbW * mbH
 
-	// YUV planes: padded to macroblock boundaries.
+	// YUV planes: single slab for Y + U + V.
 	enc.yStride = mbW * 16
 	enc.uvStride = mbW * 8
-	enc.yPlane = make([]byte, enc.yStride*mbH*16)
-	enc.uPlane = make([]byte, enc.uvStride*mbH*8)
-	enc.vPlane = make([]byte, enc.uvStride*mbH*8)
+	ySize := enc.yStride * mbH * 16
+	uSize := enc.uvStride * mbH * 8
+	yuvSlab := make([]byte, ySize+uSize+uSize)
+	enc.yPlane = yuvSlab[:ySize]
+	enc.uPlane = yuvSlab[ySize : ySize+uSize]
+	enc.vPlane = yuvSlab[ySize+uSize:]
 
-	// BPS-strided working buffers (one MB at a time).
-	enc.yuvIn = make([]byte, YUVSize)
-	enc.yuvOut = make([]byte, YUVSize)
-	enc.yuvOut2 = make([]byte, YUVSize)
-	enc.yuvP = make([]byte, 33*dsp.BPS) // top row + left column for prediction context
+	// BPS-strided working buffers: single slab for yuvIn + yuvOut + yuvOut2 + yuvP.
+	yuvPSize := 33 * dsp.BPS
+	workSlab := make([]byte, 3*YUVSize+yuvPSize)
+	enc.yuvIn = workSlab[:YUVSize]
+	enc.yuvOut = workSlab[YUVSize : 2*YUVSize]
+	enc.yuvOut2 = workSlab[2*YUVSize : 3*YUVSize]
+	enc.yuvP = workSlab[3*YUVSize:]
 
 	// MB info.
 	enc.mbInfo = make([]MBEncInfo, totalMB)
 
-	// NZ context tracking.
-	enc.topNz = make([]uint32, mbW)
-	enc.topNzDC = make([]uint8, mbW)
+	// NZ context: single slab for topNz + statTopNz (uint32) and topNzDC + statTopNzDC (uint8).
+	nzSlab := make([]uint32, mbW*2)
+	enc.topNz = nzSlab[:mbW]
+	enc.statTopNz = nzSlab[mbW:]
+	nzDCSlab := make([]uint8, mbW*2)
+	enc.topNzDC = nzDCSlab[:mbW]
+	enc.statTopNzDC = nzDCSlab[mbW:]
 
-	// Stats collection buffers (reused across collectAllStats calls).
-	enc.statTopNz = make([]uint32, mbW)
-	enc.statTopNzDC = make([]uint8, mbW)
+	// Iterator context arrays (reused across InitIterator calls).
+	enc.itTopY = make([]uint8, mbW*16)
+	enc.itTopU = make([]uint8, mbW*8)
+	enc.itTopV = make([]uint8, mbW*8)
+	enc.itTopModes = make([]uint8, mbW*4)
+	enc.itTopNZ = make([]uint32, mbW)
 
-	// DC error diffusion: enabled for method >= 3 (matching libwebp).
-	if enc.config.Method >= 3 {
-		enc.topDerr = make([][2][2]int8, mbW)
-		enc.useDerr = true
-	}
+	// Analysis buffers (reused across analysis calls).
+	enc.analysisAlphas = make([]int, totalMB)
+	enc.segMapTmp = make([]uint8, totalMB)
+
+	// DC error diffusion: topDerr always allocated (reused across pool resets);
+	// useDerr controls whether it's active (method >= 3, matching libwebp).
+	enc.topDerr = make([][2][2]int8, mbW)
+	enc.useDerr = enc.config.Method >= 3
+
 }
 
 // importImage converts the input image to YUV420 and stores it in the
@@ -488,22 +641,7 @@ func (enc *VP8Encoder) importImage(img image.Image) {
 		dsp.InitRandom(rg, enc.config.Dithering)
 	}
 
-	// Extract planar RGBA rows for the gamma/alpha pipeline.
-	// We process two rows at a time for 2x2 chroma subsampling.
-	// Row buffers: two rows of NRGBA pixel data for the current 2-row pair.
-	rowR := make([][]uint8, 2)
-	rowG := make([][]uint8, 2)
-	rowB := make([][]uint8, 2)
-	rowA := make([][]uint8, 2)
-	for i := 0; i < 2; i++ {
-		rowR[i] = make([]uint8, padW)
-		rowG[i] = make([]uint8, padW)
-		rowB[i] = make([]uint8, padW)
-		rowA[i] = make([]uint8, padW)
-	}
-	// Temporary buffer for accumulated RGBA (4 uint16 per UV sample).
 	uvWidth := (padW + 1) >> 1
-	tmpRGB := make([]uint16, uvWidth*4)
 
 	dsp.InitGammaTables()
 
@@ -640,21 +778,13 @@ func (enc *VP8Encoder) importImage(img image.Image) {
 			uvwg.Add(1)
 			go func(startPair, endPair int) {
 				defer uvwg.Done()
-				// Per-worker buffers.
-				wRowR := [2][]uint8{make([]uint8, padW), make([]uint8, padW)}
-				wRowG := [2][]uint8{make([]uint8, padW), make([]uint8, padW)}
-				wRowB := [2][]uint8{make([]uint8, padW), make([]uint8, padW)}
-				wRowA := [2][]uint8{make([]uint8, padW), make([]uint8, padW)}
-				wPlanarR := make([]uint8, padW*2)
-				wPlanarG := make([]uint8, padW*2)
-				wPlanarB := make([]uint8, padW*2)
-				wPlanarA := make([]uint8, padW*2)
+				// Get pooled or new worker buffers.
+				wk := getImportUVWorker(padW, uvWidth)
 				if !hasAlpha {
-					for i := range wPlanarA {
-						wPlanarA[i] = 0xff
+					for i := range wk.planarA {
+						wk.planarA[i] = 0xff
 					}
 				}
-				wTmpRGB := make([]uint16, uvWidth*4)
 				srcBase := (bounds.Min.Y-nrgba.Rect.Min.Y)*nrgba.Stride + (bounds.Min.X-nrgba.Rect.Min.X)*4
 
 				for y := startPair; y < endPair; y++ {
@@ -665,10 +795,10 @@ func (enc *VP8Encoder) importImage(img image.Image) {
 							sy = h - 1
 						}
 						rowOff := srcBase + sy*nrgba.Stride
-						rBuf := wRowR[row]
-						gBuf := wRowG[row]
-						bBuf := wRowB[row]
-						aBuf := wRowA[row]
+						rBuf := wk.rowR[row]
+						gBuf := wk.rowG[row]
+						bBuf := wk.rowB[row]
+						aBuf := wk.rowA[row]
 						for x := 0; x < w; x++ {
 							off := rowOff + x*4
 							rBuf[x] = nrgba.Pix[off]
@@ -685,24 +815,31 @@ func (enc *VP8Encoder) importImage(img image.Image) {
 							}
 						}
 					}
-					copy(wPlanarR[:padW], wRowR[0])
-					copy(wPlanarR[padW:], wRowR[1])
-					copy(wPlanarG[:padW], wRowG[0])
-					copy(wPlanarG[padW:], wRowG[1])
-					copy(wPlanarB[:padW], wRowB[0])
-					copy(wPlanarB[padW:], wRowB[1])
+					copy(wk.planarR[:padW], wk.rowR[0])
+					copy(wk.planarR[padW:], wk.rowR[1])
+					copy(wk.planarG[:padW], wk.rowG[0])
+					copy(wk.planarG[padW:], wk.rowG[1])
+					copy(wk.planarB[:padW], wk.rowB[0])
+					copy(wk.planarB[padW:], wk.rowB[1])
 					if hasAlpha {
-						copy(wPlanarA[:padW], wRowA[0])
-						copy(wPlanarA[padW:], wRowA[1])
+						copy(wk.planarA[:padW], wk.rowA[0])
+						copy(wk.planarA[padW:], wk.rowA[1])
 					}
-					dsp.AccumulateRGBA(wPlanarR, wPlanarG, wPlanarB, wPlanarA, padW, wTmpRGB, padW)
-					dsp.ConvertRGBA32ToUV(wTmpRGB, enc.uPlane[y*enc.uvStride:], enc.vPlane[y*enc.uvStride:], uvWidth)
+					dsp.AccumulateRGBA(wk.planarR, wk.planarG, wk.planarB, wk.planarA, padW, wk.tmpRGB, padW)
+					dsp.ConvertRGBA32ToUV(wk.tmpRGB, enc.uPlane[y*enc.uvStride:], enc.vPlane[y*enc.uvStride:], uvWidth)
 				}
+				importUVWorkerPool.Put(wk)
 			}(startPair, endPair)
 		}
 		uvwg.Wait()
 	} else {
 		// Serial path for dithered or non-NRGBA images.
+		// Allocate row buffers only when actually needed (fast NRGBA path above skips this).
+		rowR := [2][]uint8{make([]uint8, padW), make([]uint8, padW)}
+		rowG := [2][]uint8{make([]uint8, padW), make([]uint8, padW)}
+		rowB := [2][]uint8{make([]uint8, padW), make([]uint8, padW)}
+		rowA := [2][]uint8{make([]uint8, padW), make([]uint8, padW)}
+		tmpRGB := make([]uint16, uvWidth*4)
 		planarR := make([]uint8, padW*2)
 		planarG := make([]uint8, padW*2)
 		planarB := make([]uint8, padW*2)

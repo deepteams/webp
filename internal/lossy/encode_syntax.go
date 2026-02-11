@@ -2,9 +2,25 @@ package lossy
 
 import (
 	"encoding/binary"
+	"sync"
 
 	"github.com/deepteams/webp/internal/bitio"
 )
+
+var boolWriterPool sync.Pool
+
+func getBoolWriter(expectedSize int) *bitio.BoolWriter {
+	if v := boolWriterPool.Get(); v != nil {
+		bw := v.(*bitio.BoolWriter)
+		bw.Reset(expectedSize)
+		return bw
+	}
+	return bitio.NewBoolWriter(expectedSize)
+}
+
+func putBoolWriter(bw *bitio.BoolWriter) {
+	boolWriterPool.Put(bw)
+}
 
 // emitFrame assembles the complete VP8 bitstream from the encoded data.
 // The output is the raw VP8 frame data (no RIFF container).
@@ -29,7 +45,7 @@ func (enc *VP8Encoder) emitFrame() ([]byte, error) {
 
 // emitPartition0 writes the mode partition (partition 0).
 func (enc *VP8Encoder) emitPartition0() []byte {
-	bw := bitio.NewBoolWriter(enc.mbW * enc.mbH * 8)
+	bw := getBoolWriter(enc.mbW * enc.mbH * 8)
 
 	// Keyframe-specific bits (Paragraph 9.2): colorspace and clamp_type.
 	bw.PutBitUniform(0) // colorspace: 0 = YUV
@@ -80,16 +96,19 @@ func (enc *VP8Encoder) emitPartition0() []byte {
 	// Write macroblock prediction modes.
 	enc.writeMBModes(bw)
 
-	return bw.Finish()
+	result := append([]byte(nil), bw.Finish()...)
+	putBoolWriter(bw)
+	return result
 }
 
 // emitTokenPartitions writes the token data partitions.
 func (enc *VP8Encoder) emitTokenPartitions() [][]byte {
 	parts := make([][]byte, enc.numParts)
 	for i := 0; i < enc.numParts; i++ {
-		bw := bitio.NewBoolWriter(enc.mbW * enc.mbH * 32 / enc.numParts)
+		bw := getBoolWriter(enc.mbW * enc.mbH * 32 / enc.numParts)
 		enc.tokens.EmitTokensPartitioned(bw, i, enc.numParts, enc.mbW)
-		parts[i] = bw.Finish()
+		parts[i] = append([]byte(nil), bw.Finish()...)
+		putBoolWriter(bw)
 	}
 	return parts
 }
@@ -329,7 +348,11 @@ func (enc *VP8Encoder) writeCoeffProba(bw *bitio.BoolWriter) {
 // probabilities and tree structure for I4/I16, I16 mode, I4 modes, and UV mode.
 func (enc *VP8Encoder) writeMBModes(bw *bitio.BoolWriter) {
 	// Track I4 mode context, matching the decoder's intraT/intraL.
-	topModes := make([]uint8, enc.mbW*4)
+	// Reuse itTopModes (safe: iterator is not active during emit).
+	topModes := enc.itTopModes[:enc.mbW*4]
+	for i := range topModes {
+		topModes[i] = 0
+	}
 	var leftModes [4]uint8
 
 	for mbY := 0; mbY < enc.mbH; mbY++ {

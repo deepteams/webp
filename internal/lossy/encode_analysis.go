@@ -36,7 +36,11 @@ func (enc *VP8Encoder) analysis() {
 	}
 
 	// Compute alpha (complexity) for each macroblock.
-	alphas := make([]int, len(enc.mbInfo))
+	// Use pre-allocated buffer from enc.analysisAlphas.
+	alphas := enc.analysisAlphas[:len(enc.mbInfo)]
+	for i := range alphas {
+		alphas[i] = 0
+	}
 	globalUVAlpha := computeAlphas(enc, alphas)
 
 	// Store global alpha and UV alpha (matching C enc->alpha, enc->uv_alpha).
@@ -74,7 +78,7 @@ func smoothSegmentMap(enc *VP8Encoder) {
 	if w < 3 || h < 3 {
 		return
 	}
-	tmp := make([]uint8, w*h)
+	tmp := enc.segMapTmp[:w*h]
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
 			tmp[y*w+x] = enc.mbInfo[y*w+x].Segment
@@ -754,18 +758,20 @@ func assignSegments(enc *VP8Encoder, alphas []int, numSegs int) {
 	rangeA := maxA - minA
 
 	// Spread initial centers evenly in [minA, maxA].
-	centers := make([]int, numSegs)
+	// Use fixed-size arrays to avoid heap allocations (numSegs <= NumMBSegments = 4).
+	var centers [NumMBSegments]int
 	for k := 0; k < numSegs; k++ {
 		centers[k] = minA + ((2*k + 1) * rangeA) / (2 * numSegs)
 	}
 
 	// K-means iterations on histogram (matching C: MAX_ITERS_K_MEANS = 6).
-	alphaMap := make([]int, maxAlpha+1) // maps alpha value -> segment index
+	var alphaMap [maxAlpha + 1]int // maps alpha value -> segment index
 	weightedAvg := 0
+	var accum, distAccum [NumMBSegments]int
 	for iter := 0; iter < maxItersKMeans; iter++ {
 		// Accumulate contributions per segment.
-		accum := make([]int, numSegs)     // weighted count
-		distAccum := make([]int, numSegs) // weighted sum of alpha values
+		accum = [NumMBSegments]int{}
+		distAccum = [NumMBSegments]int{}
 
 		// Assign nearest center for each alpha value.
 		n := 0 // track nearest center

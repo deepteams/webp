@@ -466,6 +466,8 @@ func encodeLossyWithAlpha(img image.Image, opts *EncoderOptions) ([]byte, []byte
 		enc = lossy.NewEncoder(img, cfg)
 	}
 
+	defer lossy.ReleaseEncoder(enc)
+
 	bs, err := enc.EncodeFrame()
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("webp: lossy encode: %w", err)

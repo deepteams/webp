@@ -18,6 +18,7 @@ type parallelState struct {
 	topModes []uint8
 	topNz    []uint32 // NZ context per column (bottom-row NZ of MB above)
 	topNzDC  []uint8  // DC NZ context per column (for I16 WHT block)
+	nextRow  atomic.Int32 // atomic row counter for worker row claiming
 }
 
 var parallelPool sync.Pool
@@ -206,17 +207,17 @@ func (enc *VP8Encoder) encodeFrameParallel(stats *ProbaStats) {
 
 	// Phase A: parallel row processing.
 	var wg sync.WaitGroup
-	rowCh := make(chan int, mbH)
-	for y := 0; y < mbH; y++ {
-		rowCh <- y
-	}
-	close(rowCh)
+	ps.nextRow.Store(0)
 
 	for wi := 0; wi < numWorkers; wi++ {
 		wg.Add(1)
 		go func(w *RowWorker) {
 			defer wg.Done()
-			for y := range rowCh {
+			for {
+				y := int(ps.nextRow.Add(1) - 1)
+				if y >= mbH {
+					return
+				}
 				enc.encodeRow(w, y, topY, topU, topV, topModes, topNz, topNzDC, rs)
 			}
 		}(&workers[wi])

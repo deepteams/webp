@@ -33,6 +33,26 @@ func NewBoolWriter(expectedSize int) *BoolWriter {
 	}
 }
 
+// Reset resets the BoolWriter state for reuse, keeping the existing buffer
+// if it has sufficient capacity. This avoids re-allocation when encoding
+// multiple frames or partitions of similar size.
+func (bw *BoolWriter) Reset(expectedSize int) {
+	if expectedSize < 1024 {
+		expectedSize = 1024
+	}
+	if cap(bw.buf) >= expectedSize {
+		bw.buf = bw.buf[:0]
+	} else {
+		bw.buf = make([]byte, 0, expectedSize)
+	}
+	bw.range_ = 255 - 1
+	bw.value = 0
+	bw.run = 0
+	bw.nbBits = -8
+	bw.pos = 0
+	bw.err = nil
+}
+
 // PutBit encodes a single boolean symbol with the given probability
 // (0..255, where 255 ~ certain 0). Returns the input bit unchanged.
 func (bw *BoolWriter) PutBit(bit int, prob int) int {
