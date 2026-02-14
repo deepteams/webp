@@ -12,6 +12,9 @@ gwebp
 *.webp
 !testdata/*.webp
 
+# Profiling
+*.prof
+
 # Go build cache
 *.o
 *.a

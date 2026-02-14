@@ -202,22 +202,37 @@ gwebp info photo.webp
 
 ## Performance
 
-Benchmarked on Apple M2 Pro (10 cores), 768x576 image:
+Benchmarked on Apple M2 Pro (arm64, 10 cores), 1536x1024 RGB image, Go 1.24.2. Averages over 3 runs.
 
-| Operation | Time | Allocations |
-|---|---|---|
-| Encode lossy Q75 | ~7.5 ms | 347 allocs, 2.0 MB |
-| Encode lossy Q50 | ~7.0 ms | 347 allocs, 2.0 MB |
-| Encode lossless | ~45 ms | - |
-| Decode lossy | ~3 ms | - |
-| Decode lossless | ~5 ms | - |
+### Encode (1536x1024, Quality 75)
 
-Lossy encoding uses row-pipelined parallelism that scales with available cores.
+| Library | Mode | Time | B/op | Allocs | Output |
+|---------|------|-----:|-----:|-------:|-------:|
+| **deepteams/webp** (Pure Go) | Lossy | 127 ms | 2.1 MB | 176 | **191 KB** |
+| chai2010/webp (CGo) | Lossy | 107 ms | 229 KB | 4 | 209 KB |
+| gen2brain/webp (WASM) | Lossy | 82 ms | 19 KB | 12 | 253 KB |
+| **deepteams/webp** (Pure Go) | Lossless | 641 ms | 119 MB | 1,457 | 1,783 KB |
+| nativewebp (Pure Go) | Lossless | 445 ms | 85 MB | 2,156 | 2,012 KB |
+| chai2010/webp (CGo) | Lossless | 1,299 ms | 3.3 MB | 5 | **1,751 KB** |
+| gen2brain/webp (WASM) | Lossless | 268 ms | 502 KB | 12 | 2,054 KB |
 
-Run benchmarks yourself:
+### Decode (1536x1024)
+
+| Library | Mode | Time | B/op | Allocs |
+|---------|------|-----:|-----:|-------:|
+| **deepteams/webp** (Pure Go) | Lossy | 28 ms | 6.2 MB | 7 |
+| golang.org/x/image/webp | Lossy | 32 ms | 2.5 MB | 13 |
+| gen2brain/webp (WASM) | Lossy | 32 ms | 1.1 MB | 41 |
+| chai2010/webp (CGo) | Lossy | 14 ms | 6.9 MB | 24 |
+| **deepteams/webp** (Pure Go) | Lossless | 58 ms | 8.8 MB | 407 |
+| golang.org/x/image/webp | Lossless | 56 ms | 7.1 MB | 1,543 |
+| nativewebp (Pure Go) | Lossless | 52 ms | 6.1 MB | 50 |
+| chai2010/webp (CGo) | Lossless | 31 ms | 14.0 MB | 33 |
+
+Lossy encoding uses row-pipelined parallelism that scales with available cores. See [`benchmark/`](benchmark/) for full methodology and small-image results.
 
 ```bash
-go test -bench=. -benchmem .
+cd benchmark && go test -bench=. -benchmem -count=3 -run='^$' -timeout=30m
 ```
 
 ## Compatibility
