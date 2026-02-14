@@ -1,6 +1,6 @@
 # Binaries
 compare
-gwebp
+/gwebp
 *.test
 *.exe
 *.exe~
