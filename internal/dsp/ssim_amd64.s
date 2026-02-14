@@ -70,43 +70,23 @@ TEXT ·sse16x16SSE2(SB), NOSPLIT, $0-52
 
 loop:
 	// Load 16 bytes for this row: process as two 8-byte halves
-	// Low 8 bytes
+	// Low 8 bytes (0-7): MOVQ loads 8 bytes, PUNPCKLBW zero-extends all 8 to words
 	MOVQ (SI)(DX*1), X0
 	MOVQ (DI)(DX*1), X1
-	MOVO X0, X2
-	MOVO X1, X3
-	PUNPCKLBW X6, X0          // zero-extend low 4 bytes to words
-	PUNPCKLBW X6, X1
-	PSUBW X1, X0
-	PMADDWL X0, X0
-	PADDL X0, X7
-
-	PSRLQ $32, X2             // shift to get bytes 4-7
-	PSRLQ $32, X3
-	PUNPCKLBW X6, X2
-	PUNPCKLBW X6, X3
-	PSUBW X3, X2
-	PMADDWL X2, X2
-	PADDL X2, X7
-
-	// High 8 bytes
-	MOVQ 8(SI)(DX*1), X0
-	MOVQ 8(DI)(DX*1), X1
-	MOVO X0, X2
-	MOVO X1, X3
 	PUNPCKLBW X6, X0
 	PUNPCKLBW X6, X1
 	PSUBW X1, X0
 	PMADDWL X0, X0
 	PADDL X0, X7
 
-	PSRLQ $32, X2
-	PSRLQ $32, X3
-	PUNPCKLBW X6, X2
-	PUNPCKLBW X6, X3
-	PSUBW X3, X2
-	PMADDWL X2, X2
-	PADDL X2, X7
+	// High 8 bytes (8-15)
+	MOVQ 8(SI)(DX*1), X0
+	MOVQ 8(DI)(DX*1), X1
+	PUNPCKLBW X6, X0
+	PUNPCKLBW X6, X1
+	PSUBW X1, X0
+	PMADDWL X0, X0
+	PADDL X0, X7
 
 	ADDQ $32, DX              // offset += BPS
 	DECQ CX

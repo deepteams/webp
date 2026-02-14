@@ -325,7 +325,7 @@ func copyImageWithPrediction(argb []uint32, width, height, bits int, modes []uin
 //            costs on the ORIGINAL (unmodified) pixel data.
 //   Phase 2: Compute all residuals using scratch row buffers that hold copies
 //            of original pixels, matching libwebp's CopyImageWithPrediction.
-func ResidualImage(argb []uint32, width, height, bits, quality int) (transformData []uint32, residuals []uint32) {
+func ResidualImage(argb []uint32, width, height, bits, quality int, residualsBuf []uint32) (transformData []uint32, residuals []uint32) {
 	tileXSize := VP8LSubSampleSize(width, bits)
 	tileYSize := VP8LSubSampleSize(height, bits)
 	transformData = make([]uint32, tileXSize*tileYSize)
@@ -361,7 +361,12 @@ func ResidualImage(argb []uint32, width, height, bits, quality int) (transformDa
 
 	// Phase 2: Compute residuals using scratch row buffers so that
 	// predictions are always computed from original pixel values.
-	residuals = make([]uint32, len(argb))
+	pixCount := len(argb)
+	if cap(residualsBuf) >= pixCount {
+		residuals = residualsBuf[:pixCount]
+	} else {
+		residuals = make([]uint32, pixCount)
+	}
 	copyImageWithPrediction(argb, width, height, bits, transformData, residuals)
 
 	return transformData, residuals

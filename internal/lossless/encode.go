@@ -122,6 +122,12 @@ type Encoder struct {
 	histoImageBuf  []uint32
 	subImageHisto  *Histogram
 	huffCodes      [][HuffmanCodesPerMetaCode]*HuffmanTreeCode
+
+	// Reusable histogram slabs for GetHistoImageSymbols.
+	histoScratch HistoScratch
+
+	// Reusable residuals buffer for ResidualImage.
+	residualsBuf []uint32
 }
 
 // Errors.
@@ -318,7 +324,8 @@ func (enc *Encoder) applyTransforms() {
 
 	if enc.usePredict {
 		data, residuals := ResidualImage(enc.argb, enc.width, enc.height,
-			enc.predictorBits, enc.config.Quality)
+			enc.predictorBits, enc.config.Quality, enc.residualsBuf)
+		enc.residualsBuf = residuals
 		enc.argb = residuals
 		enc.transforms = append(enc.transforms, Transform{
 			Type:  PredictorTransform,
@@ -375,7 +382,8 @@ func (enc *Encoder) applyPaletteTransform() {
 	// C reference which passes enc->current_width to ApplyPredictFilter.
 	if enc.usePredict {
 		data, residuals := ResidualImage(enc.argb, enc.currentWidth, enc.height,
-			enc.predictorBits, enc.config.Quality)
+			enc.predictorBits, enc.config.Quality, enc.residualsBuf)
+		enc.residualsBuf = residuals
 		enc.argb = residuals
 		enc.transforms = append(enc.transforms, Transform{
 			Type:  PredictorTransform,
@@ -482,7 +490,8 @@ func (enc *Encoder) encodeStream() ([]byte, error) {
 
 	// Build histograms and get symbols.
 	symbols, histoSet := GetHistoImageSymbols(
-		currentWidth, height, refs, quality, enc.histogramBits, cacheBits)
+		currentWidth, height, refs, quality, enc.histogramBits, cacheBits,
+		&enc.histoScratch)
 
 	// Build Huffman codes for each histogram.
 	numHistos := histoSet.Size()

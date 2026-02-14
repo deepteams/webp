@@ -478,7 +478,7 @@ func TestGetHistoImageSymbols(t *testing.T) {
 		}
 	}
 
-	symbols, histoSet := GetHistoImageSymbols(width, height, refs, 75, 3, 0)
+	symbols, histoSet := GetHistoImageSymbols(width, height, refs, 75, 3, 0, nil)
 
 	if histoSet.Size() < 1 {
 		t.Error("should have at least 1 histogram")

@@ -434,22 +434,71 @@ type HistoSet struct {
 	curCombo  *Histogram // scratch for entropy bin combining
 }
 
+// HistoScratch holds reusable slab buffers for histogram allocation across
+// successive encode calls. When capacity is sufficient, the slabs are reused
+// instead of allocating fresh memory.
+type HistoScratch struct {
+	Slab    []Histogram
+	LitSlab []uint32
+	Ptrs    []*Histogram
+}
+
 // allocateHistoSet creates a set pre-populated with initialized histograms.
 // Uses slab allocation: 2 large slices (structs + literal data) instead of
 // 2*size individual allocations.
 func allocateHistoSet(size, cacheBits int) *HistoSet {
+	return allocateHistoSetReuse(size, cacheBits, nil)
+}
+
+// allocateHistoSetReuse creates a histogram set, reusing slab buffers from
+// scratch when capacity is sufficient. Returns the HistoSet; scratch is
+// updated in-place to reference the (possibly newly allocated) slabs.
+func allocateHistoSetReuse(size, cacheBits int, scratch *HistoScratch) *HistoSet {
 	litSize := histogramNumCodes(cacheBits)
-	hs := &HistoSet{
-		histos:    make([]*Histogram, size),
-		cacheBits: cacheBits,
+	totalLitSize := size * litSize
+
+	var slab []Histogram
+	var litSlab []uint32
+	var ptrs []*Histogram
+
+	if scratch != nil {
+		slab = scratch.Slab
+		litSlab = scratch.LitSlab
+		ptrs = scratch.Ptrs
 	}
-	slab := make([]Histogram, size)
-	litSlab := make([]uint32, size*litSize)
+
+	if cap(slab) >= size {
+		slab = slab[:size]
+	} else {
+		slab = make([]Histogram, size)
+	}
+	if cap(litSlab) >= totalLitSize {
+		litSlab = litSlab[:totalLitSize]
+	} else {
+		litSlab = make([]uint32, totalLitSize)
+	}
+	if cap(ptrs) >= size {
+		ptrs = ptrs[:size]
+	} else {
+		ptrs = make([]*Histogram, size)
+	}
+
 	for i := range slab {
 		slab[i].Literal = litSlab[i*litSize : (i+1)*litSize : (i+1)*litSize]
 		slab[i].paletteCodeBits = cacheBits
 		slab[i].resetStats()
-		hs.histos[i] = &slab[i]
+		ptrs[i] = &slab[i]
+	}
+
+	if scratch != nil {
+		scratch.Slab = slab
+		scratch.LitSlab = litSlab
+		scratch.Ptrs = ptrs
+	}
+
+	hs := &HistoSet{
+		histos:    ptrs,
+		cacheBits: cacheBits,
 	}
 	return hs
 }
@@ -1085,7 +1134,7 @@ func histogramRemap(origHistos []*Histogram, imageHisto *HistoSet,
 // histoBits: tile subdivision bits (tile size = 1 << histoBits)
 // cacheBits: color cache bits (0 = disabled)
 func GetHistoImageSymbols(width, height int, refs *BackwardRefs, quality int,
-	histoBits, cacheBits int) ([]uint16, *HistoSet) {
+	histoBits, cacheBits int, scratch *HistoScratch) ([]uint16, *HistoSet) {
 
 	lowEffort := quality < 25
 
@@ -1094,21 +1143,18 @@ func GetHistoImageSymbols(width, height int, refs *BackwardRefs, quality int,
 	imageHistoRawSize := histoXSize * histoYSize
 
 	// Create per-tile histograms from backward references.
-	origHisto := allocateHistoSet(imageHistoRawSize, cacheBits)
+	origHisto := allocateHistoSetReuse(imageHistoRawSize, cacheBits, scratch)
 	histogramBuild(width, histoBits, refs, origHisto)
 
-	// Copy and analyze: compute costs, filter empty histograms.
-	// Slab-allocate the copy histograms to avoid per-histogram allocation.
-	litSize := histogramNumCodes(cacheBits)
-	imageSlab := make([]Histogram, imageHistoRawSize)
-	imageLitSlab := make([]uint32, imageHistoRawSize*litSize)
-
+	// Compute costs and build imageHisto as direct pointers into origHisto's
+	// slab. This avoids allocating a full copy (~9.5 MB savings). After
+	// clustering modifies the shared data, we extract cluster centers into a
+	// small slab and rebuild origHisto for the remap pass.
 	imageHisto := &HistoSet{
 		histos:    make([]*Histogram, 0, imageHistoRawSize),
 		cacheBits: cacheBits,
 	}
 
-	imageSlabIdx := 0
 	for i := 0; i < imageHistoRawSize; i++ {
 		h := origHisto.histos[i]
 		h.computeHistogramCost()
@@ -1116,17 +1162,10 @@ func GetHistoImageSymbols(width, height int, refs *BackwardRefs, quality int,
 		if !h.isUsed[histLiteral] && !h.isUsed[histRed] &&
 			!h.isUsed[histBlue] && !h.isUsed[histAlpha] &&
 			!h.isUsed[histDistance] {
-			if i > 0 {
-				origHisto.histos[i] = nil
-			}
 			continue
 		}
 
-		dst := &imageSlab[imageSlabIdx]
-		dst.Literal = imageLitSlab[imageSlabIdx*litSize : (imageSlabIdx+1)*litSize : (imageSlabIdx+1)*litSize]
-		imageSlabIdx++
-		dst.copyFrom(h)
-		imageHisto.histos = append(imageHisto.histos, dst)
+		imageHisto.histos = append(imageHisto.histos, h)
 	}
 
 	// Entropy bin combining.
@@ -1161,6 +1200,25 @@ func GetHistoImageSymbols(width, height int, refs *BackwardRefs, quality int,
 		}
 	}
 
+	// Extract cluster centers into a small separate slab so origHisto's
+	// backing memory can be rebuilt for the remap pass.
+	extractClusterCenters(imageHisto, cacheBits)
+
+	// Rebuild origHisto from backward refs. Clustering modified shared data.
+	origHisto.clearAll()
+	histogramBuild(width, histoBits, refs, origHisto)
+
+	// Recompute costs and nil out empty entries (index > 0) for histogramRemap.
+	for i := 0; i < imageHistoRawSize; i++ {
+		h := origHisto.histos[i]
+		h.computeHistogramCost()
+		if i > 0 && !h.isUsed[histLiteral] && !h.isUsed[histRed] &&
+			!h.isUsed[histBlue] && !h.isUsed[histAlpha] &&
+			!h.isUsed[histDistance] {
+			origHisto.histos[i] = nil
+		}
+	}
+
 	// Final remap: assign each original tile to the nearest output cluster.
 	symbols := make([]uint16, imageHistoRawSize)
 	histogramRemap(origHisto.histos, imageHisto, symbols)
@@ -1171,6 +1229,25 @@ func GetHistoImageSymbols(width, height int, refs *BackwardRefs, quality int,
 	}
 
 	return symbols, imageHisto
+}
+
+// extractClusterCenters copies the cluster center histograms from the shared
+// origHisto slab into a small dedicated slab. This decouples imageHisto from
+// origHisto so the latter can be rebuilt for the remap pass.
+func extractClusterCenters(imageHisto *HistoSet, cacheBits int) {
+	n := len(imageHisto.histos)
+	if n == 0 {
+		return
+	}
+	litSize := histogramNumCodes(cacheBits)
+	slab := make([]Histogram, n)
+	litSlab := make([]uint32, n*litSize)
+	for i := 0; i < n; i++ {
+		dst := &slab[i]
+		dst.Literal = litSlab[i*litSize : (i+1)*litSize : (i+1)*litSize]
+		dst.copyFrom(imageHisto.histos[i])
+		imageHisto.histos[i] = dst
+	}
 }
 
 // histogramBuild assigns each backward-reference token to the histogram

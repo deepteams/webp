@@ -393,7 +393,7 @@ func BackwardReferences2DLocality(xsize int, refs *BackwardRefs) {
 //
 // This matches the C reference CalculateBestCacheSize in backward_references_enc.c.
 // quality <= 25 disables the color cache (returns 0).
-func CalculateBestCacheSize(argb []uint32, quality int, refs *BackwardRefs, cacheBitsMax int) int {
+func CalculateBestCacheSize(argb []uint32, quality int, refs *BackwardRefs, cacheBitsMax int, scratch *BackwardRefsScratch) int {
 	if quality <= 25 {
 		return 0
 	}
@@ -408,14 +408,35 @@ func CalculateBestCacheSize(argb []uint32, quality int, refs *BackwardRefs, cach
 	// Slab-allocate histogram structs and color cache structs to reduce allocs.
 	numHistos := cacheBitsMax + 1
 	histos := make([]*Histogram, numHistos)
-	histoSlab := make([]Histogram, numHistos)
+
+	// Reuse or allocate histogram slab.
+	var histoSlab []Histogram
+	if scratch != nil && cap(scratch.CacheSizeHistoSlab) >= numHistos {
+		histoSlab = scratch.CacheSizeHistoSlab[:numHistos]
+	} else {
+		histoSlab = make([]Histogram, numHistos)
+		if scratch != nil {
+			scratch.CacheSizeHistoSlab = histoSlab
+		}
+	}
 
 	// Each histogram has a different literal size, so compute total and allocate one slab.
 	totalLitSize := 0
 	for i := 0; i < numHistos; i++ {
 		totalLitSize += histogramNumCodes(i)
 	}
-	litSlab := make([]uint32, totalLitSize)
+	var litSlab []uint32
+	if scratch != nil && cap(scratch.CacheSizeLitSlab) >= totalLitSize {
+		litSlab = scratch.CacheSizeLitSlab[:totalLitSize]
+		for i := range litSlab {
+			litSlab[i] = 0
+		}
+	} else {
+		litSlab = make([]uint32, totalLitSize)
+		if scratch != nil {
+			scratch.CacheSizeLitSlab = litSlab
+		}
+	}
 	litOff := 0
 	for i := 0; i < numHistos; i++ {
 		ls := histogramNumCodes(i)
@@ -433,7 +454,18 @@ func CalculateBestCacheSize(argb []uint32, quality int, refs *BackwardRefs, cach
 	for i := 1; i < numHistos; i++ {
 		totalCacheSize += 1 << i
 	}
-	colorSlab := make([]uint32, totalCacheSize)
+	var colorSlab []uint32
+	if scratch != nil && cap(scratch.CacheSizeColorSlab) >= totalCacheSize {
+		colorSlab = scratch.CacheSizeColorSlab[:totalCacheSize]
+		for i := range colorSlab {
+			colorSlab[i] = 0
+		}
+	} else {
+		colorSlab = make([]uint32, totalCacheSize)
+		if scratch != nil {
+			scratch.CacheSizeColorSlab = colorSlab
+		}
+	}
 	colorOff := 0
 	for i := 1; i < numHistos; i++ {
 		sz := 1 << i
@@ -612,6 +644,12 @@ type BackwardRefsScratch struct {
 	Histo     *Histogram    // scratch histogram for cost estimation
 	CountsIni []uint16      // reusable for Lz77Box
 	BoxHC     *HashChain    // reusable hash chain for Lz77Box
+	CostsBuf  []float64     // reusable costs buffer for costManager
+
+	// Reusable slabs for CalculateBestCacheSize.
+	CacheSizeHistoSlab []Histogram
+	CacheSizeLitSlab   []uint32
+	CacheSizeColorSlab []uint32
 }
 
 func GetBackwardReferences(
@@ -693,7 +731,7 @@ func GetBackwardReferencesWithScratch(
 
 	// Phase 2: Find the optimal color cache size via brute-force search.
 	// Use the best LZ77 refs (in best) as input.
-	bestCacheBits := CalculateBestCacheSize(argb, quality, best, cacheBitsMax)
+	bestCacheBits := CalculateBestCacheSize(argb, quality, best, cacheBitsMax, scratch)
 
 	// Phase 3: If a color cache is beneficial, apply it to the refs.
 	if bestCacheBits > 0 {
@@ -726,7 +764,7 @@ func GetBackwardReferencesWithScratch(
 			}
 		}
 		if backwardReferencesTraceBackwardsWithDist(width, height, argb, bestCacheBits,
-			hc, best, traceResult, distArray) {
+			hc, best, traceResult, distArray, scratch) {
 			traceCost := histogramEstimateBitsFromRefsScratch(traceResult, bestCacheBits, histoScratch)
 			if traceCost < bestCost {
 				bestCost = traceCost
@@ -987,8 +1025,9 @@ type costManager struct {
 	freeList []*costInterval
 }
 
-// newCostManager initializes a CostManager.
-func newCostManager(distArray []uint16, pixCount int, cm *costModelTrace) *costManager {
+// newCostManager initializes a CostManager. If costsBuf is non-nil and has
+// sufficient capacity, it is reused to avoid a large allocation.
+func newCostManager(distArray []uint16, pixCount int, cm *costModelTrace, costsBuf []float64) *costManager {
 	mgr := &costManager{
 		distArray: distArray,
 	}
@@ -1027,8 +1066,12 @@ func newCostManager(distArray []uint16, pixCount int, cm *costModelTrace) *costM
 		mgr.cacheIntervals[cur].end = i + 1
 	}
 
-	// Allocate costs array, initialized to +Inf.
-	mgr.costs = make([]float64, pixCount)
+	// Reuse or allocate costs array, initialized to +Inf.
+	if cap(costsBuf) >= pixCount {
+		mgr.costs = costsBuf[:pixCount]
+	} else {
+		mgr.costs = make([]float64, pixCount)
+	}
 	for i := range mgr.costs {
 		mgr.costs[i] = math.MaxFloat64
 	}
@@ -1268,6 +1311,7 @@ func addSingleLiteralWithCostModel(
 func backwardReferencesHashChainDistanceOnly(
 	xsize, ysize int, argb []uint32, cacheBits int,
 	hc *HashChain, refs *BackwardRefs, distArray []uint16,
+	scratch *BackwardRefsScratch,
 ) bool {
 	pixCount := xsize * ysize
 	useColorCache := cacheBits > 0
@@ -1275,7 +1319,14 @@ func backwardReferencesHashChainDistanceOnly(
 	cm := newCostModelTrace(cacheBits)
 	cm.build(xsize, cacheBits, refs)
 
-	mgr := newCostManager(distArray, pixCount, cm)
+	var costsBuf []float64
+	if scratch != nil {
+		costsBuf = scratch.CostsBuf
+	}
+	mgr := newCostManager(distArray, pixCount, cm, costsBuf)
+	if scratch != nil {
+		scratch.CostsBuf = mgr.costs
+	}
 
 	var cc *ColorCache
 	if useColorCache {
@@ -1422,7 +1473,7 @@ func BackwardReferencesTraceBackwards(
 	distArraySize := xsize * ysize
 	distArray := make([]uint16, distArraySize)
 	return backwardReferencesTraceBackwardsWithDist(xsize, ysize, argb, cacheBits,
-		hc, refsSrc, refsDst, distArray)
+		hc, refsSrc, refsDst, distArray, nil /* scratch */)
 }
 
 // backwardReferencesTraceBackwardsWithDist is like BackwardReferencesTraceBackwards
@@ -1430,12 +1481,12 @@ func BackwardReferencesTraceBackwards(
 func backwardReferencesTraceBackwardsWithDist(
 	xsize, ysize int, argb []uint32, cacheBits int,
 	hc *HashChain, refsSrc *BackwardRefs, refsDst *BackwardRefs,
-	distArray []uint16,
+	distArray []uint16, scratch *BackwardRefsScratch,
 ) bool {
 	distArraySize := xsize * ysize
 
 	if !backwardReferencesHashChainDistanceOnly(
-		xsize, ysize, argb, cacheBits, hc, refsSrc, distArray) {
+		xsize, ysize, argb, cacheBits, hc, refsSrc, distArray, scratch) {
 		return false
 	}
 
