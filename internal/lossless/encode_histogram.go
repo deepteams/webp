@@ -239,7 +239,8 @@ func getEntropyUnrefined(population []uint32) (bitEntropy, streaks) {
 }
 
 // getCombinedEntropyUnrefined computes the unrefined bit entropy and streak
-// stats for the element-wise sum of two equal-length arrays.
+// stats for the element-wise sum of two equal-length arrays. The helper logic
+// is inlined to avoid pointer-passing overhead in the hot loop.
 func getCombinedEntropyUnrefined(X, Y []uint32) (bitEntropy, streaks) {
 	var be bitEntropy
 	var st streaks
@@ -252,13 +253,39 @@ func getCombinedEntropyUnrefined(X, Y []uint32) (bitEntropy, streaks) {
 	iPrev := 0
 	xyPrev := X[0] + Y[0]
 
+	// processStreak inlined from getEntropyUnrefinedHelper for performance.
+	processStreak := func(val uint32, i int) {
+		streak := i - iPrev
+		if xyPrev != 0 {
+			be.sum += xyPrev * uint32(streak)
+			be.nonzeros += streak
+			be.nonzeroCode = uint32(iPrev)
+			be.entropy += fastSLog2(xyPrev) * float64(streak)
+			if be.maxVal < xyPrev {
+				be.maxVal = xyPrev
+			}
+		}
+		isNZ := 0
+		if xyPrev != 0 {
+			isNZ = 1
+		}
+		longStreak := 0
+		if streak > 3 {
+			longStreak = 1
+		}
+		st.counts[isNZ] += longStreak
+		st.streaks[isNZ][longStreak] += streak
+		xyPrev = val
+		iPrev = i
+	}
+
 	for i := 1; i < length; i++ {
 		xy := X[i] + Y[i]
 		if xy != xyPrev {
-			getEntropyUnrefinedHelper(xy, i, &xyPrev, &iPrev, &be, &st)
+			processStreak(xy, i)
 		}
 	}
-	getEntropyUnrefinedHelper(0, length, &xyPrev, &iPrev, &be, &st)
+	processStreak(0, length)
 
 	be.entropy = fastSLog2(be.sum) - be.entropy
 	return be, st
@@ -283,10 +310,25 @@ func bitsEntropyUnrefined(array []uint32) bitEntropy {
 	return be
 }
 
+// fastSLog2LUTSize is the LUT size for fastSLog2. 4096 entries (32KB) covers
+// the vast majority of histogram count values encountered in practice.
+const fastSLog2LUTSize = 4096
+
+// fastSLog2LUT is a precomputed lookup table for v * log2(v).
+var fastSLog2LUT [fastSLog2LUTSize]float64
+
+func init() {
+	fastSLog2LUT[0] = 0
+	for i := 1; i < fastSLog2LUTSize; i++ {
+		fv := float64(i)
+		fastSLog2LUT[i] = fv * math.Log2(fv)
+	}
+}
+
 // fastSLog2 computes v * log2(v) for v > 0, returning 0 for v == 0.
 func fastSLog2(v uint32) float64 {
-	if v == 0 {
-		return 0
+	if v < fastSLog2LUTSize {
+		return fastSLog2LUT[v]
 	}
 	fv := float64(v)
 	return fv * math.Log2(fv)

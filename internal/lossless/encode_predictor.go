@@ -10,7 +10,9 @@ package lossless
 
 import (
 	"math"
+	"runtime"
 	"sort"
+	"sync"
 )
 
 // numPredictors is the number of VP8L spatial predictors to evaluate (0-13).
@@ -340,22 +342,56 @@ func ResidualImage(argb []uint32, width, height, bits, quality int, residualsBuf
 
 	// Phase 1: Select best predictor per tile using ORIGINAL pixels.
 	// estimateEntropy reads from argb but never modifies it, so all tiles
-	// see the original pixel values for their neighbors.
-	for ty := 0; ty < tileYSize; ty++ {
-		for tx := 0; tx < tileXSize; tx++ {
-			bestMode := 0
-			bestCost := math.MaxFloat64
-
-			for mode := 0; mode < maxMode; mode++ {
-				cost := estimateEntropy(argb, width, height, tx, ty, bits, mode)
-				if cost < bestCost {
-					bestCost = cost
-					bestMode = mode
-				}
+	// can be evaluated in parallel.
+	numTiles := tileXSize * tileYSize
+	if numTiles >= 16 {
+		// Parallel predictor selection: partition tile rows across goroutines.
+		numWorkers := runtime.GOMAXPROCS(0)
+		if numWorkers > tileYSize {
+			numWorkers = tileYSize
+		}
+		var wg sync.WaitGroup
+		wg.Add(numWorkers)
+		rowsPerWorker := (tileYSize + numWorkers - 1) / numWorkers
+		for w := 0; w < numWorkers; w++ {
+			tyStart := w * rowsPerWorker
+			tyEnd := tyStart + rowsPerWorker
+			if tyEnd > tileYSize {
+				tyEnd = tileYSize
 			}
-
-			// Encode predictor mode in the green channel, alpha = 0xff.
-			transformData[ty*tileXSize+tx] = uint32(bestMode)<<8 | ARGBBlack
+			go func(tyStart, tyEnd int) {
+				defer wg.Done()
+				for ty := tyStart; ty < tyEnd; ty++ {
+					for tx := 0; tx < tileXSize; tx++ {
+						bestMode := 0
+						bestCost := math.MaxFloat64
+						for mode := 0; mode < maxMode; mode++ {
+							cost := estimateEntropy(argb, width, height, tx, ty, bits, mode)
+							if cost < bestCost {
+								bestCost = cost
+								bestMode = mode
+							}
+						}
+						transformData[ty*tileXSize+tx] = uint32(bestMode)<<8 | ARGBBlack
+					}
+				}
+			}(tyStart, tyEnd)
+		}
+		wg.Wait()
+	} else {
+		for ty := 0; ty < tileYSize; ty++ {
+			for tx := 0; tx < tileXSize; tx++ {
+				bestMode := 0
+				bestCost := math.MaxFloat64
+				for mode := 0; mode < maxMode; mode++ {
+					cost := estimateEntropy(argb, width, height, tx, ty, bits, mode)
+					if cost < bestCost {
+						bestCost = cost
+						bestMode = mode
+					}
+				}
+				transformData[ty*tileXSize+tx] = uint32(bestMode)<<8 | ARGBBlack
+			}
 		}
 	}
 
@@ -529,10 +565,17 @@ func findBestMultiplier(source, target []int32) int8 {
 
 // multiplierCost computes the total absolute residual for multiplier m.
 func multiplierCost(m int8, source, target []int32) int64 {
+	// Precompute delta LUT for all 256 possible source byte values.
+	// This replaces a multiply+shift per pixel with a table lookup.
+	var deltaLUT [256]int32
+	mi := int32(m)
+	for c := 0; c < 256; c++ {
+		deltaLUT[c] = (mi * int32(int8(c))) >> 5
+	}
+
 	total := int64(0)
 	for i := range source {
-		delta := int32(encColorTransformDelta(m, uint8(source[i])))
-		residual := ((target[i] - delta) & 0xff)
+		residual := ((target[i] - deltaLUT[uint8(source[i])]) & 0xff)
 		// Wrap-aware absolute value: min(residual, 256-residual).
 		if residual > 128 {
 			residual = 256 - residual
@@ -553,16 +596,47 @@ func ColorSpaceTransform(argb []uint32, width, height, bits, quality int) []uint
 	tileYSize := VP8LSubSampleSize(height, bits)
 	transformData := make([]uint32, tileXSize*tileYSize)
 
-	// Pre-allocate scratch buffer for findBestMultipliers (5 arrays * max tile pixels).
 	tileSize := 1 << bits
 	maxTilePixels := tileSize * tileSize
-	scratch := make([]int32, 5*maxTilePixels)
+	numTiles := tileXSize * tileYSize
 
-	for ty := 0; ty < tileYSize; ty++ {
-		for tx := 0; tx < tileXSize; tx++ {
-			m := findBestMultipliers(argb, width, height, tx, ty, bits, scratch)
-			transformData[ty*tileXSize+tx] = packMultipliers(m)
-			applyColorTransformTile(argb, width, height, tx, ty, bits, m)
+	if numTiles >= 16 {
+		// Parallel cross-color transform: tiles don't overlap, so both
+		// selection and application can run independently per tile.
+		numWorkers := runtime.GOMAXPROCS(0)
+		if numWorkers > tileYSize {
+			numWorkers = tileYSize
+		}
+		var wg sync.WaitGroup
+		wg.Add(numWorkers)
+		rowsPerWorker := (tileYSize + numWorkers - 1) / numWorkers
+		for w := 0; w < numWorkers; w++ {
+			tyStart := w * rowsPerWorker
+			tyEnd := tyStart + rowsPerWorker
+			if tyEnd > tileYSize {
+				tyEnd = tileYSize
+			}
+			go func(tyStart, tyEnd int) {
+				defer wg.Done()
+				scratch := make([]int32, 5*maxTilePixels)
+				for ty := tyStart; ty < tyEnd; ty++ {
+					for tx := 0; tx < tileXSize; tx++ {
+						m := findBestMultipliers(argb, width, height, tx, ty, bits, scratch)
+						transformData[ty*tileXSize+tx] = packMultipliers(m)
+						applyColorTransformTile(argb, width, height, tx, ty, bits, m)
+					}
+				}
+			}(tyStart, tyEnd)
+		}
+		wg.Wait()
+	} else {
+		scratch := make([]int32, 5*maxTilePixels)
+		for ty := 0; ty < tileYSize; ty++ {
+			for tx := 0; tx < tileXSize; tx++ {
+				m := findBestMultipliers(argb, width, height, tx, ty, bits, scratch)
+				transformData[ty*tileXSize+tx] = packMultipliers(m)
+				applyColorTransformTile(argb, width, height, tx, ty, bits, m)
+			}
 		}
 	}
 

@@ -48,8 +48,13 @@ func getPixPairHash64Values(a, b uint32) uint32 {
 }
 
 // getMaxItersForQuality returns the maximum number of hash chain lookups
-// for a given compression quality. Return value in range [8, 86] (9.4).
+// for a given compression quality. For quality <= 75, uses quality/3 which
+// finds most good matches in fewer iterations. For quality > 75, uses the
+// original quadratic formula for maximum compression.
 func getMaxItersForQuality(quality int) int {
+	if quality <= 75 {
+		return 8 + quality/3
+	}
 	return 8 + (quality*quality)/128
 }
 

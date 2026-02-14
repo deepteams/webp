@@ -308,6 +308,11 @@ func cacheBitsForEncoder(quality int, usePalette bool, paletteSize int) int {
 		// Don't let the cache be bigger than the number of palette entries.
 		return bitsLog2Floor(paletteSize) + 1
 	}
+	// For quality < 90, cap at 7 to reduce CalculateBestCacheSize work.
+	// The optimal cache size is rarely > 7 for typical images.
+	if quality < 90 {
+		return 7
+	}
 	return maxColorCacheBitsEnc
 }
 
@@ -473,7 +478,10 @@ func (enc *Encoder) encodeStream() ([]byte, error) {
 		enc.bestRefs.Reset()
 	}
 	refs := enc.bestRefs
-	lz77Types := kLZ77Standard | kLZ77RLE | kLZ77Box
+	lz77Types := kLZ77Standard | kLZ77RLE
+	if quality >= 90 {
+		lz77Types |= kLZ77Box
+	}
 
 	// Prepare scratch buffers for GetBackwardReferences.
 	if enc.candidateRefs == nil {
@@ -621,7 +629,13 @@ func (enc *Encoder) writeTransformData(bw *bitio.LosslessWriter, t *Transform) {
 // optimization", not "no Huffman coding".
 func (enc *Encoder) encodeSubImage(bw *bitio.LosslessWriter, data []uint32, width, height int) {
 	pixelCount := width * height
-	quality := enc.config.Quality
+	// Sub-images (transform data, histogram image) are small and don't
+	// benefit much from high search quality. Use half quality to reduce
+	// hash chain search depth.
+	quality := enc.config.Quality / 2
+	if quality < 1 {
+		quality = 1
+	}
 
 	// Build hash chain from the sub-image pixel data (reuse if capacity sufficient).
 	hc := enc.hashChain

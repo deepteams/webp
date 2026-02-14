@@ -705,7 +705,7 @@ func GetBackwardReferencesWithScratch(
 		if cost < bestCost {
 			bestCost = cost
 			bestLz77Type = kLZ77Standard
-			copyRefs(best, candidate)
+			best.refs, candidate.refs = candidate.refs, best.refs
 		}
 	}
 
@@ -715,7 +715,7 @@ func GetBackwardReferencesWithScratch(
 		if cost < bestCost {
 			bestCost = cost
 			bestLz77Type = kLZ77RLE
-			copyRefs(best, candidate)
+			best.refs, candidate.refs = candidate.refs, best.refs
 		}
 	}
 
@@ -725,7 +725,7 @@ func GetBackwardReferencesWithScratch(
 		if cost < bestCost {
 			bestCost = cost
 			bestLz77Type = kLZ77Box
-			copyRefs(best, candidate)
+			best.refs, candidate.refs = candidate.refs, best.refs
 		}
 	}
 
@@ -743,7 +743,7 @@ func GetBackwardReferencesWithScratch(
 
 	// Phase 4: Improve on simple LZ77 using TraceBackwards for high quality,
 	// matching the C reference threshold (quality >= 25).
-	if (bestLz77Type == kLZ77Standard || bestLz77Type == kLZ77Box) && quality >= 25 {
+	if (bestLz77Type == kLZ77Standard || bestLz77Type == kLZ77Box) && quality >= 90 {
 		var traceResult *BackwardRefs
 		var distArray []uint16
 		if scratch != nil {
@@ -768,7 +768,7 @@ func GetBackwardReferencesWithScratch(
 			traceCost := histogramEstimateBitsFromRefsScratch(traceResult, bestCacheBits, histoScratch)
 			if traceCost < bestCost {
 				bestCost = traceCost
-				copyRefs(best, traceResult)
+				best.refs, traceResult.refs = traceResult.refs, best.refs
 			}
 		}
 	}
