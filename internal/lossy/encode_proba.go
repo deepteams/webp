@@ -326,6 +326,7 @@ func (enc *VP8Encoder) rerecordAllTokens() {
 	enc.leftNzDC = 0
 	enc.tokens.Reset()
 
+	var tmpIt MBIterator
 	for mbY := 0; mbY < enc.mbH; mbY++ {
 		enc.leftNz = 0
 		enc.leftNzDC = 0
@@ -343,9 +344,10 @@ func (enc *VP8Encoder) rerecordAllTokens() {
 				continue
 			}
 
-			// Create a minimal iterator for recordMBTokens.
-			tmpIt := &MBIterator{X: mbX, Y: mbY, MBIdx: idx}
-			enc.recordMBTokens(tmpIt, info)
+			tmpIt.X = mbX
+			tmpIt.Y = mbY
+			tmpIt.MBIdx = idx
+			enc.recordMBTokens(&tmpIt, info)
 		}
 	}
 }

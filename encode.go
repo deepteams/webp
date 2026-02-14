@@ -542,10 +542,37 @@ func encodeLossless(img image.Image, opts *EncoderOptions) ([]byte, uint32, erro
 	// double-premultiplication when the decoder's argbToNRGBA treats them
 	// as non-premultiplied on output.
 	argb := make([]uint32, width*height)
-	for y := 0; y < height; y++ {
-		for x := 0; x < width; x++ {
-			c := color.NRGBAModel.Convert(img.At(bounds.Min.X+x, bounds.Min.Y+y)).(color.NRGBA)
-			argb[y*width+x] = uint32(c.A)<<24 | uint32(c.R)<<16 | uint32(c.G)<<8 | uint32(c.B)
+	if nrgba, ok := img.(*image.NRGBA); ok {
+		for y := 0; y < height; y++ {
+			rowOff := (y+bounds.Min.Y-nrgba.Rect.Min.Y)*nrgba.Stride + (bounds.Min.X-nrgba.Rect.Min.X)*4
+			for x := 0; x < width; x++ {
+				off := rowOff + x*4
+				argb[y*width+x] = uint32(nrgba.Pix[off+3])<<24 | uint32(nrgba.Pix[off])<<16 | uint32(nrgba.Pix[off+1])<<8 | uint32(nrgba.Pix[off+2])
+			}
+		}
+	} else if rgba, ok := img.(*image.RGBA); ok {
+		for y := 0; y < height; y++ {
+			rowOff := (y+bounds.Min.Y-rgba.Rect.Min.Y)*rgba.Stride + (bounds.Min.X-rgba.Rect.Min.X)*4
+			for x := 0; x < width; x++ {
+				off := rowOff + x*4
+				a := rgba.Pix[off+3]
+				r, g, b := rgba.Pix[off], rgba.Pix[off+1], rgba.Pix[off+2]
+				// Un-premultiply for lossless encoding (VP8L stores NRGBA).
+				if a > 0 && a < 255 {
+					a16 := uint16(a)
+					r = uint8(uint16(r) * 255 / a16)
+					g = uint8(uint16(g) * 255 / a16)
+					b = uint8(uint16(b) * 255 / a16)
+				}
+				argb[y*width+x] = uint32(a)<<24 | uint32(r)<<16 | uint32(g)<<8 | uint32(b)
+			}
+		}
+	} else {
+		for y := 0; y < height; y++ {
+			for x := 0; x < width; x++ {
+				c := color.NRGBAModel.Convert(img.At(bounds.Min.X+x, bounds.Min.Y+y)).(color.NRGBA)
+				argb[y*width+x] = uint32(c.A)<<24 | uint32(c.R)<<16 | uint32(c.G)<<8 | uint32(c.B)
+			}
 		}
 	}
 
@@ -586,10 +613,42 @@ func cleanupTransparentAreaLossy(img image.Image) image.Image {
 
 	// Convert to NRGBA so we can modify pixels in place.
 	nrgba := image.NewNRGBA(image.Rect(0, 0, width, height))
-	for y := 0; y < height; y++ {
-		for x := 0; x < width; x++ {
-			c := color.NRGBAModel.Convert(img.At(bounds.Min.X+x, bounds.Min.Y+y)).(color.NRGBA)
-			nrgba.SetNRGBA(x, y, c)
+	if src, ok := img.(*image.NRGBA); ok {
+		for y := 0; y < height; y++ {
+			srcOff := (y+bounds.Min.Y-src.Rect.Min.Y)*src.Stride + (bounds.Min.X-src.Rect.Min.X)*4
+			dstOff := y * nrgba.Stride
+			copy(nrgba.Pix[dstOff:dstOff+width*4], src.Pix[srcOff:srcOff+width*4])
+		}
+	} else if src, ok := img.(*image.RGBA); ok {
+		for y := 0; y < height; y++ {
+			srcOff := (y+bounds.Min.Y-src.Rect.Min.Y)*src.Stride + (bounds.Min.X-src.Rect.Min.X)*4
+			dstOff := y * nrgba.Stride
+			for x := 0; x < width; x++ {
+				soff := srcOff + x*4
+				doff := dstOff + x*4
+				a := src.Pix[soff+3]
+				if a == 0 {
+					// nrgba.Pix already zeroed by NewNRGBA
+				} else if a == 255 {
+					nrgba.Pix[doff] = src.Pix[soff]
+					nrgba.Pix[doff+1] = src.Pix[soff+1]
+					nrgba.Pix[doff+2] = src.Pix[soff+2]
+					nrgba.Pix[doff+3] = 255
+				} else {
+					a16 := uint16(a)
+					nrgba.Pix[doff] = uint8(uint16(src.Pix[soff]) * 255 / a16)
+					nrgba.Pix[doff+1] = uint8(uint16(src.Pix[soff+1]) * 255 / a16)
+					nrgba.Pix[doff+2] = uint8(uint16(src.Pix[soff+2]) * 255 / a16)
+					nrgba.Pix[doff+3] = a
+				}
+			}
+		}
+	} else {
+		for y := 0; y < height; y++ {
+			for x := 0; x < width; x++ {
+				c := color.NRGBAModel.Convert(img.At(bounds.Min.X+x, bounds.Min.Y+y)).(color.NRGBA)
+				nrgba.SetNRGBA(x, y, c)
+			}
 		}
 	}
 
@@ -851,6 +910,18 @@ func imageHasAlpha(img image.Image) bool {
 		}
 		return false
 	}
+	if rgba, ok := img.(*image.RGBA); ok {
+		for y := b.Min.Y; y < b.Max.Y; y++ {
+			off := (y-b.Min.Y)*rgba.Stride + 3
+			for x := 0; x < b.Dx(); x++ {
+				if rgba.Pix[off] != 255 {
+					return true
+				}
+				off += 4
+			}
+		}
+		return false
+	}
 	for y := b.Min.Y; y < b.Max.Y; y++ {
 		for x := b.Min.X; x < b.Max.X; x++ {
 			_, _, _, a := img.At(x, y).RGBA()
@@ -875,13 +946,39 @@ func sharpYUVConvert(img image.Image) (*image.YCbCr, error) {
 	// Convert to packed RGB (3 bytes per pixel, row-major).
 	rgbStride := w * 3
 	rgb := make([]byte, h*rgbStride)
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			c := color.NRGBAModel.Convert(img.At(bounds.Min.X+x, bounds.Min.Y+y)).(color.NRGBA)
-			off := y*rgbStride + x*3
-			rgb[off+0] = c.R
-			rgb[off+1] = c.G
-			rgb[off+2] = c.B
+	if nrgba, ok := img.(*image.NRGBA); ok {
+		for y := 0; y < h; y++ {
+			srcOff := (y+bounds.Min.Y-nrgba.Rect.Min.Y)*nrgba.Stride + (bounds.Min.X-nrgba.Rect.Min.X)*4
+			dstOff := y * rgbStride
+			for x := 0; x < w; x++ {
+				rgb[dstOff] = nrgba.Pix[srcOff]
+				rgb[dstOff+1] = nrgba.Pix[srcOff+1]
+				rgb[dstOff+2] = nrgba.Pix[srcOff+2]
+				srcOff += 4
+				dstOff += 3
+			}
+		}
+	} else if rgba, ok := img.(*image.RGBA); ok {
+		for y := 0; y < h; y++ {
+			srcOff := (y+bounds.Min.Y-rgba.Rect.Min.Y)*rgba.Stride + (bounds.Min.X-rgba.Rect.Min.X)*4
+			dstOff := y * rgbStride
+			for x := 0; x < w; x++ {
+				rgb[dstOff] = rgba.Pix[srcOff]
+				rgb[dstOff+1] = rgba.Pix[srcOff+1]
+				rgb[dstOff+2] = rgba.Pix[srcOff+2]
+				srcOff += 4
+				dstOff += 3
+			}
+		}
+	} else {
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				c := color.NRGBAModel.Convert(img.At(bounds.Min.X+x, bounds.Min.Y+y)).(color.NRGBA)
+				off := y*rgbStride + x*3
+				rgb[off+0] = c.R
+				rgb[off+1] = c.G
+				rgb[off+2] = c.B
+			}
 		}
 	}
 
@@ -905,6 +1002,26 @@ func extractAlpha(img image.Image) []byte {
 	b := img.Bounds()
 	w, h := b.Dx(), b.Dy()
 	alpha := make([]byte, w*h)
+	if nrgba, ok := img.(*image.NRGBA); ok {
+		for y := 0; y < h; y++ {
+			rowOff := (y+b.Min.Y-nrgba.Rect.Min.Y)*nrgba.Stride + (b.Min.X-nrgba.Rect.Min.X)*4 + 3
+			for x := 0; x < w; x++ {
+				alpha[y*w+x] = nrgba.Pix[rowOff]
+				rowOff += 4
+			}
+		}
+		return alpha
+	}
+	if rgba, ok := img.(*image.RGBA); ok {
+		for y := 0; y < h; y++ {
+			rowOff := (y+b.Min.Y-rgba.Rect.Min.Y)*rgba.Stride + (b.Min.X-rgba.Rect.Min.X)*4 + 3
+			for x := 0; x < w; x++ {
+				alpha[y*w+x] = rgba.Pix[rowOff]
+				rowOff += 4
+			}
+		}
+		return alpha
+	}
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
 			c := color.NRGBAModel.Convert(img.At(b.Min.X+x, b.Min.Y+y)).(color.NRGBA)

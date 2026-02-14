@@ -646,7 +646,23 @@ func (enc *VP8Encoder) importImage(img image.Image) {
 	dsp.InitGammaTables()
 
 	// Type-assert for direct pixel access (avoids interface boxing heap allocs).
+	// Both *image.NRGBA and *image.RGBA share the same Pix layout (R,G,B,A per pixel).
+	// For opaque images (the common case), premultiplied == non-premultiplied.
 	nrgba, isNRGBA := img.(*image.NRGBA)
+	rgba, isRGBA := img.(*image.RGBA)
+	isDirect := isNRGBA || isRGBA
+	var pix []uint8
+	var pixStride int
+	var pixRect image.Rectangle
+	if isNRGBA {
+		pix = nrgba.Pix
+		pixStride = nrgba.Stride
+		pixRect = nrgba.Rect
+	} else if isRGBA {
+		pix = rgba.Pix
+		pixStride = rgba.Stride
+		pixRect = rgba.Rect
+	}
 
 	// extractRow fills the planar buffers for a given source row.
 	extractRow := func(srcY int, rBuf, gBuf, bBuf, aBuf []uint8) {
@@ -654,18 +670,18 @@ func (enc *VP8Encoder) importImage(img image.Image) {
 		if sy >= bounds.Min.Y+h {
 			sy = bounds.Min.Y + h - 1
 		}
-		if isNRGBA {
-			rowOff := (sy-nrgba.Rect.Min.Y)*nrgba.Stride + (bounds.Min.X-nrgba.Rect.Min.X)*4
+		if isDirect {
+			rowOff := (sy-pixRect.Min.Y)*pixStride + (bounds.Min.X-pixRect.Min.X)*4
 			for x := 0; x < padW; x++ {
 				sx := x
 				if sx >= w {
 					sx = w - 1
 				}
 				off := rowOff + sx*4
-				rBuf[x] = nrgba.Pix[off]
-				gBuf[x] = nrgba.Pix[off+1]
-				bBuf[x] = nrgba.Pix[off+2]
-				aBuf[x] = nrgba.Pix[off+3]
+				rBuf[x] = pix[off]
+				gBuf[x] = pix[off+1]
+				bBuf[x] = pix[off+2]
+				aBuf[x] = pix[off+3]
 			}
 		} else {
 			for x := 0; x < padW; x++ {
@@ -685,8 +701,8 @@ func (enc *VP8Encoder) importImage(img image.Image) {
 	// Convert to Y plane (full resolution).
 	// When dithering is active, use randomized rounding instead of fixed
 	// YUV_HALF, matching C ConvertRowToY with VP8RandomBits(rg, YUV_FIX).
-	if isNRGBA && rg == nil {
-		// Fast parallel path for non-dithered NRGBA.
+	if isDirect && rg == nil {
+		// Fast parallel path for non-dithered direct pixel access (NRGBA/RGBA).
 		nWorkers := runtime.GOMAXPROCS(0)
 		if nWorkers > padH {
 			nWorkers = padH
@@ -698,18 +714,17 @@ func (enc *VP8Encoder) importImage(img image.Image) {
 			ywg.Add(1)
 			go func(startY, endY int) {
 				defer ywg.Done()
-				minY := bounds.Min.Y
-				srcBase := (minY-nrgba.Rect.Min.Y)*nrgba.Stride + (bounds.Min.X-nrgba.Rect.Min.X)*4
+				srcBase := (bounds.Min.Y-pixRect.Min.Y)*pixStride + (bounds.Min.X-pixRect.Min.X)*4
 				for y := startY; y < endY; y++ {
 					sy := y
 					if sy >= h {
 						sy = h - 1
 					}
-					rowOff := srcBase + sy*nrgba.Stride
+					rowOff := srcBase + sy*pixStride
 					dstBase := y * enc.yStride
 					for x := 0; x < w; x++ {
 						off := rowOff + x*4
-						enc.yPlane[dstBase+x] = dsp.RGBToY(int(nrgba.Pix[off]), int(nrgba.Pix[off+1]), int(nrgba.Pix[off+2]))
+						enc.yPlane[dstBase+x] = dsp.RGBToY(int(pix[off]), int(pix[off+1]), int(pix[off+2]))
 					}
 					// Edge replication for padding.
 					if padW > w {
@@ -722,20 +737,20 @@ func (enc *VP8Encoder) importImage(img image.Image) {
 			}(startY, endY)
 		}
 		ywg.Wait()
-	} else if isNRGBA {
+	} else if isDirect {
 		for y := 0; y < padH; y++ {
 			sy := y + bounds.Min.Y
 			if sy >= bounds.Min.Y+h {
 				sy = bounds.Min.Y + h - 1
 			}
-			rowOff := (sy-nrgba.Rect.Min.Y)*nrgba.Stride + (bounds.Min.X-nrgba.Rect.Min.X)*4
+			rowOff := (sy-pixRect.Min.Y)*pixStride + (bounds.Min.X-pixRect.Min.X)*4
 			for x := 0; x < padW; x++ {
 				sx := x
 				if sx >= w {
 					sx = w - 1
 				}
 				off := rowOff + sx*4
-				ri, gi, bi := int(nrgba.Pix[off]), int(nrgba.Pix[off+1]), int(nrgba.Pix[off+2])
+				ri, gi, bi := int(pix[off]), int(pix[off+1]), int(pix[off+2])
 				enc.yPlane[y*enc.yStride+x] = dsp.RGBToYRounding(ri, gi, bi, dsp.RandomBits(rg, dsp.YUVFix))
 			}
 		}
@@ -765,8 +780,8 @@ func (enc *VP8Encoder) importImage(img image.Image) {
 	// Process two rows at a time (matching C ImportYUVAFromRGBA_C).
 	halfPadH := padH / 2
 
-	if isNRGBA && rg == nil {
-		// Fast parallel path for non-dithered NRGBA.
+	if isDirect && rg == nil {
+		// Fast parallel path for non-dithered direct pixel access (NRGBA/RGBA).
 		nUVWorkers := runtime.GOMAXPROCS(0)
 		if nUVWorkers > halfPadH {
 			nUVWorkers = halfPadH
@@ -785,7 +800,7 @@ func (enc *VP8Encoder) importImage(img image.Image) {
 						wk.planarA[i] = 0xff
 					}
 				}
-				srcBase := (bounds.Min.Y-nrgba.Rect.Min.Y)*nrgba.Stride + (bounds.Min.X-nrgba.Rect.Min.X)*4
+				srcBase := (bounds.Min.Y-pixRect.Min.Y)*pixStride + (bounds.Min.X-pixRect.Min.X)*4
 
 				for y := startPair; y < endPair; y++ {
 					for row := 0; row < 2; row++ {
@@ -794,17 +809,17 @@ func (enc *VP8Encoder) importImage(img image.Image) {
 						if sy >= h {
 							sy = h - 1
 						}
-						rowOff := srcBase + sy*nrgba.Stride
+						rowOff := srcBase + sy*pixStride
 						rBuf := wk.rowR[row]
 						gBuf := wk.rowG[row]
 						bBuf := wk.rowB[row]
 						aBuf := wk.rowA[row]
 						for x := 0; x < w; x++ {
 							off := rowOff + x*4
-							rBuf[x] = nrgba.Pix[off]
-							gBuf[x] = nrgba.Pix[off+1]
-							bBuf[x] = nrgba.Pix[off+2]
-							aBuf[x] = nrgba.Pix[off+3]
+							rBuf[x] = pix[off]
+							gBuf[x] = pix[off+1]
+							bBuf[x] = pix[off+2]
+							aBuf[x] = pix[off+3]
 						}
 						if padW > w {
 							for x := w; x < padW; x++ {
@@ -894,6 +909,30 @@ func imageHasAlpha(img image.Image) bool {
 			}
 			for ; x < w; x++ {
 				acc &= nrgba.Pix[rowOff+3]
+				rowOff += 4
+			}
+			if acc != 0xff {
+				return true
+			}
+		}
+		return false
+	}
+	if rgba, ok := img.(*image.RGBA); ok {
+		bounds := rgba.Bounds()
+		w := bounds.Dx()
+		for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+			rowOff := (y-rgba.Rect.Min.Y)*rgba.Stride + (bounds.Min.X-rgba.Rect.Min.X)*4
+			acc := uint8(0xff)
+			x := 0
+			for ; x+4 <= w; x += 4 {
+				acc &= rgba.Pix[rowOff+3]
+				acc &= rgba.Pix[rowOff+7]
+				acc &= rgba.Pix[rowOff+11]
+				acc &= rgba.Pix[rowOff+15]
+				rowOff += 16
+			}
+			for ; x < w; x++ {
+				acc &= rgba.Pix[rowOff+3]
 				rowOff += 4
 			}
 			if acc != 0xff {
