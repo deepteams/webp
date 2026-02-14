@@ -182,7 +182,15 @@ func Encode(argb []uint32, width, height int, config *EncoderConfig) ([]byte, er
 	enc.applyTransforms()
 
 	// Encode the image.
-	return enc.encodeStream()
+	bs, err := enc.encodeStream()
+	if err != nil {
+		return nil, err
+	}
+	// Copy the result so it does not alias the pooled writerBuf,
+	// which would race with a concurrent encode reusing the same encoder.
+	out := make([]byte, len(bs))
+	copy(out, bs)
+	return out, nil
 }
 
 // analyze determines which transforms to use and sets encoding parameters.

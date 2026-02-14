@@ -20,55 +20,55 @@ Last updated: 2026-02-14
 
 | Library | Time (ms) | B/op | Allocs | Output Size |
 |---------|----------:|-----:|-------:|------------:|
-| gen2brain/webp (WASM) | **82** | 19 KB | 12 | 252,712 B |
-| chai2010/webp (CGo) | 107 | 229 KB | 4 | 209,180 B |
-| **deepteams/webp** (Pure Go) | 127 | 2.1 MB | 176 | **190,622 B** |
+| gen2brain/webp (WASM) | **84** | 20 KB | 12 | 252,712 B |
+| chai2010/webp (CGo) | 111 | 234 KB | 4 | 209,180 B |
+| **deepteams/webp** (Pure Go) | 134 | 2.3 MB | 191 | **190,622 B** |
 
 ### Encode Lossless (1536x1024)
 
 | Library | Time (ms) | B/op | Allocs | Output Size |
 |---------|----------:|-----:|-------:|------------:|
-| gen2brain/webp (WASM) | **268** | 502 KB | 12 | 2,053,844 B |
-| nativewebp (Pure Go) | 445 | 85 MB | 2,156 | 2,011,754 B |
-| **deepteams/webp** (Pure Go) | 641 | 119 MB | 1,457 | 1,782,638 B |
-| chai2010/webp (CGo) | 1,299 | 3.3 MB | 5 | **1,751,450 B** |
+| gen2brain/webp (WASM) | **283** | 514 KB | 12 | 2,053,844 B |
+| nativewebp (Pure Go) | 437 | 89 MB | 2,156 | 2,011,754 B |
+| **deepteams/webp** (Pure Go) | 640 | 127 MB | 1,462 | 1,782,638 B |
+| chai2010/webp (CGo) | 1,312 | 3.5 MB | 5 | **1,751,450 B** |
 
 ### Decode Lossy (1536x1024)
 
 | Library | Time (ms) | B/op | Allocs |
 |---------|----------:|-----:|-------:|
-| chai2010/webp (CGo) | **13.7** | 6.9 MB | 24 |
-| **deepteams/webp** (Pure Go) | 27.7 | 6.2 MB | 7 |
-| gen2brain/webp (WASM) | 31.5 | 1.1 MB | 41 |
-| golang.org/x/image/webp | 32.4 | 2.5 MB | 13 |
+| chai2010/webp (CGo) | **13.1** | 7.2 MB | 24 |
+| golang.org/x/image/webp | 25.6 | 2.6 MB | 13 |
+| **deepteams/webp** (Pure Go) | 27.1 | 6.5 MB | 7 |
+| gen2brain/webp (WASM) | 32.3 | 1.2 MB | 41 |
 
 ### Decode Lossless (1536x1024)
 
 | Library | Time (ms) | B/op | Allocs |
 |---------|----------:|-----:|-------:|
-| chai2010/webp (CGo) | **31.5** | 14.0 MB | 33 |
-| nativewebp (Pure Go) | 52.0 | 6.1 MB | 50 |
-| gen2brain/webp (WASM) | 55.8 | 10.1 MB | 50 |
-| golang.org/x/image/webp | 56.4 | 7.1 MB | 1,543 |
-| **deepteams/webp** (Pure Go) | 58.0 | 8.8 MB | 407 |
+| chai2010/webp (CGo) | **33.0** | 14.7 MB | 33 |
+| nativewebp (Pure Go) | 53.6 | 6.4 MB | 50 |
+| golang.org/x/image/webp | 57.7 | 7.4 MB | 1,543 |
+| gen2brain/webp (WASM) | 57.7 | 10.6 MB | 50 |
+| **deepteams/webp** (Pure Go) | 59.0 | 8.5 MB | 407 |
 
 ### Encode Lossy Small (Quality 75, 256x256)
 
 | Library | Time (ms) | B/op | Allocs |
 |---------|----------:|-----:|-------:|
-| gen2brain/webp (WASM) | **3.39** | 267 B | 12 |
-| chai2010/webp (CGo) | 6.24 | 776 KB | 131,077 |
-| **deepteams/webp** (Pure Go) | 6.93 | 33 KB | 89 |
+| gen2brain/webp (WASM) | **3.4** | 267 B | 12 |
+| chai2010/webp (CGo) | 6.3 | 795 KB | 131,077 |
+| **deepteams/webp** (Pure Go) | 7.0 | 33 KB | 88 |
 
 ## Key Takeaways
 
-1. **Best lossy compression**: deepteams/webp produces the smallest lossy files (190 KB vs 209-252 KB), indicating better rate-distortion optimization.
+1. **Best lossy compression**: deepteams/webp produces the smallest lossy files (191 KB vs 209-253 KB), indicating better rate-distortion optimization.
 
-2. **Fastest lossless among pure Go**: deepteams/webp lossless encode (641ms) is 30% faster than nativewebp (445ms is faster but produces 13% larger files). deepteams/webp matches chai2010 (CGo) compression ratio while being 2x faster.
+2. **Best lossless compression among pure Go**: deepteams/webp lossless output (1,783 KB) is 11% smaller than nativewebp (2,012 KB) while matching chai2010 (CGo). 2x faster than chai2010.
 
-3. **Competitive decode performance**: deepteams/webp lossy decode (28ms) is faster than both gen2brain/webp (WASM, 32ms) and golang.org/x/image/webp (32ms), with the fewest allocations among pure Go decoders (7 allocs).
+3. **Competitive decode performance**: deepteams/webp lossy decode (27ms) is faster than gen2brain/webp (WASM, 32ms) with the fewest allocations among all decoders (7 allocs).
 
-4. **Efficient memory on small images**: On 256x256 images, deepteams/webp uses only 33 KB and 89 allocs, vs chai2010/webp which uses 776 KB and 131K allocs due to CGo overhead.
+4. **Efficient memory on small images**: On 256x256 images, deepteams/webp uses only 33 KB and 88 allocs, vs chai2010/webp which uses 795 KB and 131K allocs due to CGo overhead.
 
 5. **No CGo, no WASM**: deepteams/webp and nativewebp are the only libraries that work without CGo or WASM runtimes. Cross-compilation just works.
 
