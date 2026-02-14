@@ -377,3 +377,279 @@ TEXT ·transformWHTNEON(SB), NOSPLIT, $0-48
 	MOVH R7, 480(R1)
 
 	RET
+
+// func iTransformOneNEON(ref []byte, in []int16, dst []byte)
+// NEON inverse DCT 4x4. c1=20091, c2=35468. ref/dst stride=BPS=32.
+// Uses in[] as scratch after loading coefficients.
+TEXT ·iTransformOneNEON(SB), NOSPLIT, $0-72
+	MOVD ref_base+0(FP), R0
+	MOVD in_base+24(FP), R1
+	MOVD dst_base+48(FP), R2
+
+	// Constants
+	MOVW $20091, R3
+	VDUP R3, V28.S4
+	MOVW $35468, R3
+	VDUP R3, V29.S4
+	MOVW $4, R3
+	VDUP R3, V30.S4
+
+	// Load 16 int16 coefficients (32 bytes)
+	VLD1 (R1), [V16.B16, V17.B16]
+
+	// Widen int16 → int32 (4 rows)
+	WORD $0x0f10a600    // SXTL  V0.4S, V16.4H  (row0)
+	WORD $0x4f10a601    // SXTL2 V1.4S, V16.8H  (row1)
+	WORD $0x0f10a622    // SXTL  V2.4S, V17.4H  (row2)
+	WORD $0x4f10a623    // SXTL2 V3.4S, V17.8H  (row3)
+
+	// Vertical butterfly
+	VADD V2.S4, V0.S4, V4.S4     // a = row0+row2
+	VSUB V2.S4, V0.S4, V5.S4     // b = row0-row2
+	// Launch 4 VMULs for pipelining
+	WORD $0x4ebc9c26              // V6  = V1*20091
+	WORD $0x4ebd9c27              // V7  = V1*35468
+	WORD $0x4ebc9c70              // V16 = V3*20091
+	WORD $0x4ebd9c71              // V17 = V3*35468
+	WORD $0x4f3004c6              // SSHR V6, #16
+	WORD $0x4f3004e7              // SSHR V7, #16  → mul2(row1)
+	WORD $0x4f300610              // SSHR V16, #16
+	WORD $0x4f300631              // SSHR V17, #16 → mul2(row3)
+	VADD V1.S4, V6.S4, V6.S4     // mul1(row1)
+	VADD V3.S4, V16.S4, V16.S4   // mul1(row3)
+	VSUB V16.S4, V7.S4, V16.S4   // cc = mul2(row1)-mul1(row3)
+	VADD V17.S4, V6.S4, V17.S4   // d  = mul1(row1)+mul2(row3)
+	VADD V17.S4, V4.S4, V0.S4    // tmp0 = a+d
+	VADD V16.S4, V5.S4, V1.S4    // tmp1 = b+cc
+	VSUB V16.S4, V5.S4, V2.S4    // tmp2 = b-cc
+	VSUB V17.S4, V4.S4, V3.S4    // tmp3 = a-d
+
+	// Transpose 1 (rows → columns)
+	WORD $0x4e812804    // TRN1 V4, V0, V1
+	WORD $0x4e816805    // TRN2 V5, V0, V1
+	WORD $0x4e832846    // TRN1 V6, V2, V3
+	WORD $0x4e836847    // TRN2 V7, V2, V3
+	WORD $0x4ec63890    // ZIP1 V16←V4,V6 (col0)
+	WORD $0x4ec67892    // ZIP2 V18←V4,V6 (col2)
+	WORD $0x4ec738b1    // ZIP1 V17←V5,V7 (col1)
+	WORD $0x4ec778b3    // ZIP2 V19←V5,V7 (col3)
+
+	// Horizontal butterfly
+	VADD V30.S4, V16.S4, V16.S4  // dc = col0+4
+	VADD V18.S4, V16.S4, V4.S4   // a = dc+col2
+	VSUB V18.S4, V16.S4, V5.S4   // b = dc-col2
+	WORD $0x4ebc9e26              // V6  = V17*20091
+	WORD $0x4ebd9e27              // V7  = V17*35468
+	WORD $0x4ebc9e74              // V20 = V19*20091
+	WORD $0x4ebd9e75              // V21 = V19*35468
+	WORD $0x4f3004c6              // SSHR V6, #16
+	WORD $0x4f3004e7              // SSHR V7, #16  → mul2(col1)
+	WORD $0x4f300694              // SSHR V20, #16
+	WORD $0x4f3006b5              // SSHR V21, #16 → mul2(col3)
+	VADD V17.S4, V6.S4, V6.S4    // mul1(col1)
+	VADD V19.S4, V20.S4, V20.S4  // mul1(col3)
+	VSUB V20.S4, V7.S4, V20.S4   // cc
+	VADD V21.S4, V6.S4, V21.S4   // d
+	VADD V21.S4, V4.S4, V0.S4    // a+d
+	VADD V20.S4, V5.S4, V1.S4    // b+cc
+	VSUB V20.S4, V5.S4, V2.S4    // b-cc
+	VSUB V21.S4, V4.S4, V3.S4    // a-d
+	WORD $0x4f3d0400              // SSHR V0, #3
+	WORD $0x4f3d0421              // SSHR V1, #3
+	WORD $0x4f3d0442              // SSHR V2, #3
+	WORD $0x4f3d0463              // SSHR V3, #3
+
+	// Transpose 2 (columns → rows)
+	WORD $0x4e812804    // TRN1 V4, V0, V1
+	WORD $0x4e816805    // TRN2 V5, V0, V1
+	WORD $0x4e832846    // TRN1 V6, V2, V3
+	WORD $0x4e836847    // TRN2 V7, V2, V3
+	WORD $0x4ec63890    // ZIP1 V16←V4,V6 (row0)
+	WORD $0x4ec67892    // ZIP2 V18←V4,V6 (row2)
+	WORD $0x4ec738b1    // ZIP1 V17←V5,V7 (row1)
+	WORD $0x4ec778b3    // ZIP2 V19←V5,V7 (row3)
+
+	// Load ref (stride 32), pack into in[] scratch, widen
+	MOVWU (R0), R3
+	MOVW R3, (R1)
+	MOVWU 32(R0), R3
+	MOVW R3, 4(R1)
+	MOVWU 64(R0), R3
+	MOVW R3, 8(R1)
+	MOVWU 96(R0), R3
+	MOVW R3, 12(R1)
+	VLD1 (R1), [V24.B16]
+	WORD $0x2f08a719    // UXTL  V25.8H, V24.8B
+	WORD $0x6f08a71a    // UXTL2 V26.8H, V24.16B
+	WORD $0x2f10a734    // UXTL  V20.4S, V25.4H  (ref row0)
+	WORD $0x6f10a735    // UXTL2 V21.4S, V25.8H  (ref row1)
+	WORD $0x2f10a756    // UXTL  V22.4S, V26.4H  (ref row2)
+	WORD $0x6f10a757    // UXTL2 V23.4S, V26.8H  (ref row3)
+	VADD V20.S4, V16.S4, V0.S4
+	VADD V21.S4, V17.S4, V1.S4
+	VADD V22.S4, V18.S4, V2.S4
+	VADD V23.S4, V19.S4, V3.S4
+	// Clip: SQXTN(int32→int16) + SQXTUN(int16→uint8)
+	WORD $0x0e614804    // SQXTN  V4.4H, V0.4S
+	WORD $0x4e614824    // SQXTN2 V4.8H, V1.4S
+	WORD $0x0e614845    // SQXTN  V5.4H, V2.4S
+	WORD $0x4e614865    // SQXTN2 V5.8H, V3.4S
+	WORD $0x2e212886    // SQXTUN  V6.8B, V4.8H
+	WORD $0x6e2128a6    // SQXTUN2 V6.16B, V5.8H
+
+	// Store result (stride 32) via scratch
+	VST1 [V6.B16], (R1)
+	MOVWU (R1), R3
+	MOVW R3, (R2)
+	MOVWU 4(R1), R3
+	MOVW R3, 32(R2)
+	MOVWU 8(R1), R3
+	MOVW R3, 64(R2)
+	MOVWU 12(R1), R3
+	MOVW R3, 96(R2)
+	RET
+
+// func fTransformNEON(src, ref []byte, out []int16)
+// NEON forward DCT 4x4. src/ref stride=BPS=32.
+// Uses out[] as scratch for byte packing.
+TEXT ·fTransformNEON(SB), NOSPLIT, $0-72
+	MOVD src_base+0(FP), R0
+	MOVD ref_base+24(FP), R1
+	MOVD out_base+48(FP), R2
+
+	// Constants for horizontal pass
+	MOVW $2217, R3
+	VDUP R3, V28.S4
+	MOVW $5352, R3
+	VDUP R3, V29.S4
+	MOVW $1812, R3
+	VDUP R3, V26.S4
+	MOVW $937, R3
+	VDUP R3, V25.S4
+
+	// Load src (stride 32), pack into out[] scratch
+	MOVWU (R0), R3
+	MOVWU 32(R0), R4
+	MOVWU 64(R0), R5
+	MOVWU 96(R0), R6
+	MOVW R3, (R2)
+	MOVW R4, 4(R2)
+	MOVW R5, 8(R2)
+	MOVW R6, 12(R2)
+	// Load ref (stride 32), pack at out+16
+	MOVWU (R1), R3
+	MOVWU 32(R1), R4
+	MOVWU 64(R1), R5
+	MOVWU 96(R1), R6
+	MOVW R3, 16(R2)
+	MOVW R4, 20(R2)
+	MOVW R5, 24(R2)
+	MOVW R6, 28(R2)
+	VLD1 (R2), [V24.B16, V25.B16]
+
+	// Widen uint8→uint16
+	WORD $0x2f08a702    // UXTL  V2.8H, V24.8B
+	WORD $0x6f08a703    // UXTL2 V3.8H, V24.16B
+	WORD $0x2f08a724    // UXTL  V4.8H, V25.8B
+	WORD $0x6f08a725    // UXTL2 V5.8H, V25.16B
+	// diff = src - ref (int16)
+	VSUB V4.H8, V2.H8, V0.H8
+	VSUB V5.H8, V3.H8, V1.H8
+
+	// Reload V25 constant (clobbered by VLD1)
+	MOVW $937, R3
+	VDUP R3, V25.S4
+
+	// Widen diff int16→int32
+	WORD $0x0f10a410    // SXTL  V16.4S, V0.4H
+	WORD $0x4f10a411    // SXTL2 V17.4S, V0.8H
+	WORD $0x0f10a432    // SXTL  V18.4S, V1.4H
+	WORD $0x4f10a433    // SXTL2 V19.4S, V1.8H
+
+	// Transpose 1 (rows → column vectors)
+	WORD $0x4e912a04    // TRN1 V4, V16, V17
+	WORD $0x4e916a05    // TRN2 V5, V16, V17
+	WORD $0x4e932a46    // TRN1 V6, V18, V19
+	WORD $0x4e936a47    // TRN2 V7, V18, V19
+	WORD $0x4ec63880    // ZIP1 V0←V4,V6 (d0)
+	WORD $0x4ec67882    // ZIP2 V2←V4,V6 (d2)
+	WORD $0x4ec738a1    // ZIP1 V1←V5,V7 (d1)
+	WORD $0x4ec778a3    // ZIP2 V3←V5,V7 (d3)
+
+	// Horizontal butterfly
+	VADD V3.S4, V0.S4, V4.S4     // a0 = d0+d3
+	VADD V2.S4, V1.S4, V5.S4     // a1 = d1+d2
+	VSUB V2.S4, V1.S4, V6.S4     // a2 = d1-d2
+	VSUB V3.S4, V0.S4, V7.S4     // a3 = d0-d3
+	VADD V5.S4, V4.S4, V20.S4    // a0+a1
+	WORD $0x4f235694               // SHL V20, #3  → (a0+a1)*8
+	VSUB V5.S4, V4.S4, V22.S4    // a0-a1
+	WORD $0x4f2356d6               // SHL V22, #3  → (a0-a1)*8
+	// (a2*2217+a3*5352+1812)>>9
+	WORD $0x4ebc9cd5               // V21 = V6*2217
+	WORD $0x4ebd9cf0               // V16 = V7*5352
+	VADD V16.S4, V21.S4, V21.S4
+	VADD V26.S4, V21.S4, V21.S4
+	WORD $0x4f3706b5               // SSHR V21, #9
+	// (a3*2217-a2*5352+937)>>9
+	WORD $0x4ebc9cf7               // V23 = V7*2217
+	WORD $0x4ebd9cd0               // V16 = V6*5352
+	VSUB V16.S4, V23.S4, V23.S4
+	VADD V25.S4, V23.S4, V23.S4
+	WORD $0x4f3706f7               // SSHR V23, #9
+
+	// Transpose 2 (columns → rows)
+	WORD $0x4e952a84    // TRN1 V4, V20, V21
+	WORD $0x4e956a85    // TRN2 V5, V20, V21
+	WORD $0x4e972ac6    // TRN1 V6, V22, V23
+	WORD $0x4e976ac7    // TRN2 V7, V22, V23
+	WORD $0x4ec63880    // ZIP1 V0←V4,V6 (row0)
+	WORD $0x4ec67882    // ZIP2 V2←V4,V6 (row2)
+	WORD $0x4ec738a1    // ZIP1 V1←V5,V7 (row1)
+	WORD $0x4ec778a3    // ZIP2 V3←V5,V7 (row3)
+
+	// Vertical pass constants
+	MOVW $7, R3
+	VDUP R3, V30.S4
+	MOVW $12000, R3
+	VDUP R3, V31.S4
+	MOVW $51000, R3
+	VDUP R3, V27.S4
+
+	// Vertical butterfly
+	VADD V3.S4, V0.S4, V4.S4     // a0
+	VADD V2.S4, V1.S4, V5.S4     // a1
+	VSUB V2.S4, V1.S4, V6.S4     // a2
+	VSUB V3.S4, V0.S4, V7.S4     // a3
+	// out_row0 = (a0+a1+7)>>4
+	VADD V5.S4, V4.S4, V16.S4
+	VADD V30.S4, V16.S4, V16.S4
+	WORD $0x4f3c0610               // SSHR V16, #4
+	// out_row2 = (a0-a1+7)>>4
+	VSUB V5.S4, V4.S4, V18.S4
+	VADD V30.S4, V18.S4, V18.S4
+	WORD $0x4f3c0652               // SSHR V18, #4
+	// out_row1 = (a2*2217+a3*5352+12000)>>16 + b2i(a3!=0)
+	WORD $0x4ebc9cd1               // V17 = V6*2217
+	WORD $0x4ebd9cf3               // V19 = V7*5352
+	VADD V19.S4, V17.S4, V17.S4
+	VADD V31.S4, V17.S4, V17.S4
+	WORD $0x4f300631               // SSHR V17, #16
+	WORD $0x4ea098f4               // CMEQ V20, V7, #0
+	WORD $0x6e205a94               // MVN  V20, V20
+	VUSHR $31, V20.S4, V20.S4
+	VADD V20.S4, V17.S4, V17.S4
+	// out_row3 = (a3*2217-a2*5352+51000)>>16
+	WORD $0x4ebc9cf3               // V19 = V7*2217
+	WORD $0x4ebd9cd4               // V20 = V6*5352
+	VSUB V20.S4, V19.S4, V19.S4
+	VADD V27.S4, V19.S4, V19.S4
+	WORD $0x4f300673               // SSHR V19, #16
+
+	// Narrow int32→int16 (truncating) and store
+	WORD $0x0e612a00    // XTN  V0.4H, V16.4S
+	WORD $0x4e612a20    // XTN2 V0.8H, V17.4S
+	WORD $0x0e612a41    // XTN  V1.4H, V18.4S
+	WORD $0x4e612a61    // XTN2 V1.8H, V19.4S
+	VST1 [V0.B16, V1.B16], (R2)
+	RET

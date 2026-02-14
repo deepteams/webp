@@ -25,9 +25,22 @@ func init() {
 	PredChroma8[2] = ve8uvNEON
 	PredChroma8[3] = he8uvNEON
 
+	// DCT transforms.
+	ITransform = iTransformNEON
+	// FTransform: NEON is slower than Go for 4x4 blocks due to
+	// strided byte packing overhead. Keep pure Go.
+
 	// Lossless color transforms.
 	AddGreenToBlueAndRedFunc = addGreenToBlueAndRedNEON
 	SubtractGreenFunc = subtractGreenNEON
+}
+
+// iTransformNEON wraps the single-block NEON IDCT to handle doTwo.
+func iTransformNEON(ref []byte, in []int16, dst []byte, doTwo bool) {
+	iTransformOneNEON(ref, in, dst)
+	if doTwo {
+		iTransformOneNEON(ref[4:], in[16:], dst[4:])
+	}
 }
 
 // --- NEON assembly function stubs ---
@@ -84,3 +97,9 @@ func dc8uvNEON(dst []byte, off int)  { dc8uvasmNEON(dst, off) }
 func tm8uvNEON(dst []byte, off int)  { tm8uvasmNEON(dst, off) }
 func ve8uvNEON(dst []byte, off int)  { ve8uvasmNEON(dst, off) }
 func he8uvNEON(dst []byte, off int)  { he8uvasmNEON(dst, off) }
+
+//go:noescape
+func iTransformOneNEON(ref []byte, in []int16, dst []byte)
+
+//go:noescape
+func fTransformNEON(src, ref []byte, out []int16)

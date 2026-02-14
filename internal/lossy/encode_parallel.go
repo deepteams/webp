@@ -65,10 +65,11 @@ type rowSync struct {
 
 // rowState is padded to a full cache line (64 bytes) to prevent false sharing.
 type rowState struct {
-	done atomic.Int32
-	mu   sync.Mutex
-	cond *sync.Cond
-	_    [16]byte
+	done    atomic.Int32
+	waiters atomic.Int32
+	mu      sync.Mutex
+	cond    *sync.Cond
+	_       [8]byte
 }
 
 func newRowSync(mbH int) *rowSync {
@@ -88,22 +89,26 @@ func (rs *rowSync) waitFor(y int, needed int32) {
 	if r.done.Load() >= needed {
 		return
 	}
+	r.waiters.Add(1)
 	r.mu.Lock()
 	for r.done.Load() < needed {
 		r.cond.Wait()
 	}
 	r.mu.Unlock()
+	r.waiters.Add(-1)
 }
 
 // signal marks that row y has completed done MBs and wakes all waiters.
-// Broadcast is used because both the token-recording goroutine (Phase B)
-// and a row-Y+1 worker (Phase A) may wait on the same row's Cond.
+// Fast path: if no goroutine is waiting, just do an atomic store.
+// Slow path: Lock + Broadcast when waiters are present.
 func (rs *rowSync) signal(y int, done int32) {
 	r := &rs.rows[y]
-	r.mu.Lock()
 	r.done.Store(done)
-	r.mu.Unlock()
-	r.cond.Broadcast()
+	if r.waiters.Load() > 0 {
+		r.mu.Lock()
+		r.mu.Unlock()
+		r.cond.Broadcast()
+	}
 }
 
 // RowWorker holds per-worker state for parallel row encoding.
@@ -163,8 +168,13 @@ func (enc *VP8Encoder) encodeFrameParallel(stats *ProbaStats) {
 	mbW := enc.mbW
 	mbH := enc.mbH
 
-	// Determine number of workers.
+	// Determine number of workers. Cap at 6 to reduce idle goroutine
+	// overhead — beyond 6 workers the pipeline depth (3 rows) limits
+	// parallelism and extra goroutines just add sync contention.
 	numWorkers := runtime.GOMAXPROCS(0)
+	if numWorkers > 6 {
+		numWorkers = 6
+	}
 	if numWorkers > mbH {
 		numWorkers = mbH
 	}

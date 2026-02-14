@@ -438,6 +438,128 @@ func BenchmarkTM8uvDispatch(b *testing.B) {
 	}
 }
 
+// ---------- FTransform / ITransform conformance ----------
+
+func TestFTransformConformance(t *testing.T) {
+	rng := rand.New(rand.NewSource(200))
+	for iter := 0; iter < 100; iter++ {
+		src := makeRandBuf(rng, 4*BPS)
+		ref := makeRandBuf(rng, 4*BPS)
+		goOut := make([]int16, 16)
+		dispOut := make([]int16, 16)
+		FTransformDirect(src, ref, goOut)
+		FTransform(src, ref, dispOut)
+		for i := 0; i < 16; i++ {
+			if goOut[i] != dispOut[i] {
+				t.Fatalf("iter %d: FTransform mismatch at [%d]: go=%d dispatch=%d", iter, i, goOut[i], dispOut[i])
+			}
+		}
+	}
+}
+
+func TestITransformConformance(t *testing.T) {
+	rng := rand.New(rand.NewSource(201))
+	for iter := 0; iter < 100; iter++ {
+		ref := makeRandBuf(rng, 4*BPS)
+		in := make([]int16, 16)
+		for i := range in {
+			in[i] = int16(rng.Intn(2001) - 1000)
+		}
+		goDst := makeRandBuf(rng, 4*BPS)
+		dispDst := copyBuf(goDst)
+		dispRef := copyBuf(ref)
+		inCopy := make([]int16, 16)
+		copy(inCopy, in)
+		ITransformDirect(ref, in, goDst, false)
+		ITransform(dispRef, inCopy, dispDst, false)
+		for r := 0; r < 4; r++ {
+			for c := 0; c < 4; c++ {
+				off := r*BPS + c
+				if goDst[off] != dispDst[off] {
+					t.Fatalf("iter %d: ITransform mismatch at (%d,%d): go=%d dispatch=%d", iter, r, c, goDst[off], dispDst[off])
+				}
+			}
+		}
+	}
+}
+
+func TestITransformDoTwoConformance(t *testing.T) {
+	rng := rand.New(rand.NewSource(202))
+	for iter := 0; iter < 50; iter++ {
+		ref := makeRandBuf(rng, 4*BPS)
+		in := make([]int16, 32)
+		for i := range in {
+			in[i] = int16(rng.Intn(2001) - 1000)
+		}
+		goDst := makeRandBuf(rng, 4*BPS)
+		dispDst := copyBuf(goDst)
+		dispRef := copyBuf(ref)
+		inCopy := make([]int16, 32)
+		copy(inCopy, in)
+		ITransformDirect(ref, in, goDst, true)
+		ITransform(dispRef, inCopy, dispDst, true)
+		for r := 0; r < 4; r++ {
+			for c := 0; c < 8; c++ {
+				off := r*BPS + c
+				if goDst[off] != dispDst[off] {
+					t.Fatalf("iter %d: ITransform(doTwo) mismatch at (%d,%d): go=%d dispatch=%d", iter, r, c, goDst[off], dispDst[off])
+				}
+			}
+		}
+	}
+}
+
+func BenchmarkFTransformGo(b *testing.B) {
+	rng := rand.New(rand.NewSource(210))
+	src := makeRandBuf(rng, 4*BPS)
+	ref := makeRandBuf(rng, 4*BPS)
+	out := make([]int16, 16)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		FTransformDirect(src, ref, out)
+	}
+}
+
+func BenchmarkFTransformDispatch(b *testing.B) {
+	rng := rand.New(rand.NewSource(210))
+	src := makeRandBuf(rng, 4*BPS)
+	ref := makeRandBuf(rng, 4*BPS)
+	out := make([]int16, 16)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		FTransform(src, ref, out)
+	}
+}
+
+func BenchmarkITransformGo(b *testing.B) {
+	rng := rand.New(rand.NewSource(211))
+	ref := makeRandBuf(rng, 4*BPS)
+	in := make([]int16, 16)
+	for i := range in {
+		in[i] = int16(rng.Intn(2001) - 1000)
+	}
+	dst := make([]byte, 4*BPS)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ITransformDirect(ref, in, dst, false)
+	}
+}
+
+func BenchmarkITransformDispatch(b *testing.B) {
+	rng := rand.New(rand.NewSource(211))
+	ref := makeRandBuf(rng, 4*BPS)
+	in := make([]int16, 16)
+	for i := range in {
+		in[i] = int16(rng.Intn(2001) - 1000)
+	}
+	dst := make([]byte, 4*BPS)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		copy(in, in) // prevent dead-code elimination
+		ITransform(ref, in, dst, false)
+	}
+}
+
 func BenchmarkTransformWHTGo(b *testing.B) {
 	in := make([]int16, 16)
 	out := make([]int16, 256)
