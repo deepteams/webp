@@ -2,6 +2,7 @@ package webp
 
 import (
 	"bytes"
+	"fmt"
 	"image"
 	"image/color"
 	"math"
@@ -1687,6 +1688,59 @@ func TestLossyRoundtrip_ColorBoundary(t *testing.T) {
 
 // TestLossyRoundtrip_SolidColors tests that solid pure-color 16x16 blocks
 // roundtrip reasonably through lossy encoding. This isolates the chroma issue.
+func TestEncodeLossless_LargeRoundtrip(t *testing.T) {
+	sizes := []int{32, 64, 128, 256, 512}
+	for _, sz := range sizes {
+		t.Run(fmt.Sprintf("%dx%d", sz, sz), func(t *testing.T) {
+			img := gradientTestImage(sz, sz)
+			var buf bytes.Buffer
+			err := Encode(&buf, img, &EncoderOptions{
+				Lossless: true,
+				Quality:  75,
+				Method:   4,
+			})
+			if err != nil {
+				t.Fatalf("Encode %dx%d: %v", sz, sz, err)
+			}
+			t.Logf("Encoded %dx%d: %d bytes", sz, sz, buf.Len())
+
+			decoded, err := Decode(bytes.NewReader(buf.Bytes()))
+			if err != nil {
+				t.Fatalf("Decode %dx%d: %v", sz, sz, err)
+			}
+
+			bounds := decoded.Bounds()
+			if bounds.Dx() != sz || bounds.Dy() != sz {
+				t.Fatalf("decoded size = %dx%d, want %dx%d", bounds.Dx(), bounds.Dy(), sz, sz)
+			}
+
+			// Lossless: every pixel should match exactly.
+			nrgbaImg, ok := decoded.(*image.NRGBA)
+			if !ok {
+				t.Fatalf("decoded image is %T, want *image.NRGBA", decoded)
+			}
+			mismatches := 0
+			for y := 0; y < sz; y++ {
+				for x := 0; x < sz; x++ {
+					orig := img.NRGBAAt(x, y)
+					dec := nrgbaImg.NRGBAAt(x, y)
+					if orig != dec {
+						if mismatches < 5 {
+							t.Errorf("pixel(%d,%d) orig=(%d,%d,%d,%d) dec=(%d,%d,%d,%d)",
+								x, y, orig.R, orig.G, orig.B, orig.A,
+								dec.R, dec.G, dec.B, dec.A)
+						}
+						mismatches++
+					}
+				}
+			}
+			if mismatches > 0 {
+				t.Errorf("total mismatched pixels: %d / %d", mismatches, sz*sz)
+			}
+		})
+	}
+}
+
 func TestLossyRoundtrip_SolidColors(t *testing.T) {
 	colors := []struct {
 		name string

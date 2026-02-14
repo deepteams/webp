@@ -168,7 +168,7 @@ func BuildHuffmanTable(rootBits int, codeLengths []int) ([]HuffmanCode, error) {
 				low = key & mask
 				rootTable[low] = HuffmanCode{
 					Bits:  uint8(tableBits + rootBits),
-					Value: uint16(tableOff - int(low)),
+					Value: uint16(tableOff),
 				}
 			}
 			code := HuffmanCode{
