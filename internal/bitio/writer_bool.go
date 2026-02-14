@@ -96,6 +96,53 @@ func (bw *BoolWriter) PutBitUniform(bit int) int {
 	return bit
 }
 
+// PutBitBatchPacked encodes count boolean symbols from packed bit/prob pairs.
+// Each pair occupies 2 consecutive bytes: [bit, prob, bit, prob, ...].
+// The data slice must have at least count*2 bytes.
+//
+// This is optimized for large batches (e.g., token emission): the encoder's
+// hot state (range_, value, nbBits) is kept in local variables (registers)
+// instead of reading/writing through the struct pointer on each iteration.
+func (bw *BoolWriter) PutBitBatchPacked(data []byte, count int) {
+	if count <= 0 {
+		return
+	}
+	_ = data[count*2-1] // BCE hint
+	r := bw.range_
+	v := bw.value
+	nb := bw.nbBits
+	for i := 0; i < count; i++ {
+		bit := data[i*2]
+		prob := int32(data[i*2+1])
+		split := (r * prob) >> 8
+		if bit != 0 {
+			v += split + 1
+			r -= split + 1
+		} else {
+			r = split
+		}
+		if r < 127 {
+			shift := kNorm[r]
+			r = int32(kNewRange[r])
+			v <<= uint(shift)
+			nb += int(shift)
+			if nb > 0 {
+				// Write back before flush (flush reads from bw fields).
+				bw.range_ = r
+				bw.value = v
+				bw.nbBits = nb
+				bw.flush()
+				// Read back after flush (flush modifies value and nbBits).
+				v = bw.value
+				nb = bw.nbBits
+			}
+		}
+	}
+	bw.range_ = r
+	bw.value = v
+	bw.nbBits = nb
+}
+
 // PutBits encodes nbBits bits from value, MSB first, each with uniform
 // probability.
 func (bw *BoolWriter) PutBits(value uint32, nbBits int) {

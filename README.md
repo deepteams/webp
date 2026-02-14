@@ -208,26 +208,27 @@ Benchmarked on Apple M2 Pro (arm64, 10 cores), 1536x1024 RGB image, Go 1.24.2. M
 
 | Library | Mode | Time | B/op | Allocs | Output |
 |---------|------|-----:|-----:|-------:|-------:|
-| **deepteams/webp** (Pure Go) | Lossy | 92 ms | 1.7 MB | 127 | **192 KB** |
+| **deepteams/webp** (Pure Go) | Lossy | **83 ms** | 1.6 MB | 130 | **193 KB** |
+| gen2brain/webp (WASM) | Lossy | 85 ms | 20 KB | 12 | 253 KB |
 | chai2010/webp (CGo) | Lossy | 110 ms | 234 KB | 4 | 209 KB |
-| gen2brain/webp (WASM) | Lossy | 84 ms | 20 KB | 12 | 253 KB |
-| **deepteams/webp** (Pure Go) | Lossless | 442 ms | 115 MB | 1,460 | 1,783 KB |
-| nativewebp (Pure Go) | Lossless | 442 ms | 89 MB | 2,156 | 2,012 KB |
-| chai2010/webp (CGo) | Lossless | 1,318 ms | 3.5 MB | 5 | **1,751 KB** |
-| gen2brain/webp (WASM) | Lossless | 287 ms | 514 KB | 12 | 2,054 KB |
+| gen2brain/webp (WASM) | Lossless | 299 ms | 514 KB | 12 | 2,054 KB |
+| nativewebp (Pure Go) | Lossless | 437 ms | 89 MB | 2,156 | 2,012 KB |
+| **deepteams/webp** (Pure Go) | Lossless | 447 ms | 115 MB | 1,457 | 1,783 KB |
+| chai2010/webp (CGo) | Lossless | 1,363 ms | 3.5 MB | 5 | **1,751 KB** |
 
 ### Decode (1536x1024)
 
 | Library | Mode | Time | B/op | Allocs |
 |---------|------|-----:|-----:|-------:|
-| **deepteams/webp** (Pure Go) | Lossy | 28 ms | 6.5 MB | 7 |
-| golang.org/x/image/webp | Lossy | 25 ms | 2.6 MB | 13 |
-| gen2brain/webp (WASM) | Lossy | 32 ms | 1.2 MB | 41 |
 | chai2010/webp (CGo) | Lossy | 13 ms | 7.2 MB | 24 |
-| **deepteams/webp** (Pure Go) | Lossless | 59 ms | 8.5 MB | 407 |
-| golang.org/x/image/webp | Lossless | 58 ms | 7.4 MB | 1,543 |
-| nativewebp (Pure Go) | Lossless | 54 ms | 6.4 MB | 50 |
+| golang.org/x/image/webp | Lossy | 25 ms | 2.6 MB | 13 |
+| **deepteams/webp** (Pure Go) | Lossy | 27 ms | 6.5 MB | 7 |
+| gen2brain/webp (WASM) | Lossy | 32 ms | 1.2 MB | 41 |
 | chai2010/webp (CGo) | Lossless | 33 ms | 14.7 MB | 33 |
+| nativewebp (Pure Go) | Lossless | 54 ms | 6.4 MB | 50 |
+| gen2brain/webp (WASM) | Lossless | 57 ms | 10.6 MB | 50 |
+| golang.org/x/image/webp | Lossless | 57 ms | 7.4 MB | 1,543 |
+| **deepteams/webp** (Pure Go) | Lossless | 58 ms | 8.5 MB | 407 |
 
 Lossy encoding uses row-pipelined parallelism that scales with available cores. See [`benchmark/`](benchmark/) for full methodology and small-image results.
 

@@ -1,6 +1,10 @@
 package lossy
 
-import "github.com/deepteams/webp/internal/bitio"
+import (
+	"unsafe"
+
+	"github.com/deepteams/webp/internal/bitio"
+)
 
 // tokenPageSize is the number of tokens per page in the TokenBuffer.
 // Larger pages reduce allocation frequency. A typical 640x480 Q75 encode
@@ -296,12 +300,17 @@ func (tb *TokenBuffer) recordLevelVP8(level int, p []uint8) int {
 }
 
 // EmitTokens writes all recorded tokens to a boolean writer.
+// Uses batch encoding to keep BoolWriter hot state in registers.
 func (tb *TokenBuffer) EmitTokens(bw *bitio.BoolWriter) {
 	for _, page := range tb.pages {
-		for i := 0; i < page.count; i++ {
-			t := &page.tokens[i]
-			bw.PutBit(int(t.Bit), int(t.Prob))
+		count := page.count
+		if count == 0 {
+			continue
 		}
+		// Token is {uint8, uint8} = 2 bytes, no padding. Reinterpret as
+		// packed byte pairs [bit0, prob0, bit1, prob1, ...] for batch encoding.
+		data := unsafe.Slice((*byte)(unsafe.Pointer(&page.tokens[0])), count*2)
+		bw.PutBitBatchPacked(data, count)
 	}
 }
 
@@ -329,11 +338,24 @@ func (tb *TokenBuffer) EmitTokensPartitioned(bw *bitio.BoolWriter, partIdx, numP
 
 		startTok := tb.mbStart[mbIdx]
 		endTok := tb.mbStart[mbIdx+1]
-		for tok := startTok; tok < endTok; tok++ {
+		// Process tokens in page-aligned chunks for batch encoding.
+		for tok := startTok; tok < endTok; {
 			pageIdx := tok / tokenPageSize
 			tokIdx := tok % tokenPageSize
-			t := &tb.pages[pageIdx].tokens[tokIdx]
-			bw.PutBit(int(t.Bit), int(t.Prob))
+			page := tb.pages[pageIdx]
+			// How many tokens remain on this page for this MB?
+			pageEnd := tokenPageSize
+			if startOff := endTok - pageIdx*tokenPageSize; startOff < pageEnd {
+				pageEnd = startOff
+			}
+			count := pageEnd - tokIdx
+			if count <= 0 {
+				tok++
+				continue
+			}
+			data := unsafe.Slice((*byte)(unsafe.Pointer(&page.tokens[tokIdx])), count*2)
+			bw.PutBitBatchPacked(data, count)
+			tok += count
 		}
 	}
 }

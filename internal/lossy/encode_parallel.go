@@ -927,7 +927,7 @@ func pickBestI4ModeRDParallel(w *RowWorker, srcBuf []byte, srcOff int, predBuf [
 // maxI4RDModes is the maximum number of I4 prediction modes to evaluate
 // with full RD. Modes are pre-screened by prediction SSE and only the
 // most promising ones get the expensive encode-decode cycle.
-const maxI4RDModes = 4
+const maxI4RDModes = 3
 
 func pickBestI4ModeRDTrellisParallel(w *RowWorker, srcBuf []byte, srcOff int, predBuf []byte, predOff int,
 	seg *SegmentInfo, topMode, leftMode uint8, hasTop, hasLeft bool, nzCtx int, proba *Proba) (bestMode uint8, bestScore uint64, bestRate int, bestDisto int) {
