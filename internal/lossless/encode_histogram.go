@@ -434,13 +434,21 @@ type HistoSet struct {
 }
 
 // allocateHistoSet creates a set pre-populated with initialized histograms.
+// Uses slab allocation: 2 large slices (structs + literal data) instead of
+// 2*size individual allocations.
 func allocateHistoSet(size, cacheBits int) *HistoSet {
+	litSize := histogramNumCodes(cacheBits)
 	hs := &HistoSet{
 		histos:    make([]*Histogram, size),
 		cacheBits: cacheBits,
 	}
-	for i := 0; i < size; i++ {
-		hs.histos[i] = NewHistogram(cacheBits)
+	slab := make([]Histogram, size)
+	litSlab := make([]uint32, size*litSize)
+	for i := range slab {
+		slab[i].Literal = litSlab[i*litSize : (i+1)*litSize : (i+1)*litSize]
+		slab[i].paletteCodeBits = cacheBits
+		slab[i].resetStats()
+		hs.histos[i] = &slab[i]
 	}
 	return hs
 }
@@ -1086,11 +1094,17 @@ func GetHistoImageSymbols(width, height int, refs *BackwardRefs, quality int,
 	histogramBuild(width, histoBits, refs, origHisto)
 
 	// Copy and analyze: compute costs, filter empty histograms.
+	// Slab-allocate the copy histograms to avoid per-histogram allocation.
+	litSize := histogramNumCodes(cacheBits)
+	imageSlab := make([]Histogram, imageHistoRawSize)
+	imageLitSlab := make([]uint32, imageHistoRawSize*litSize)
+
 	imageHisto := &HistoSet{
 		histos:    make([]*Histogram, 0, imageHistoRawSize),
 		cacheBits: cacheBits,
 	}
 
+	imageSlabIdx := 0
 	for i := 0; i < imageHistoRawSize; i++ {
 		h := origHisto.histos[i]
 		h.computeHistogramCost()
@@ -1104,7 +1118,9 @@ func GetHistoImageSymbols(width, height int, refs *BackwardRefs, quality int,
 			continue
 		}
 
-		dst := NewHistogram(cacheBits)
+		dst := &imageSlab[imageSlabIdx]
+		dst.Literal = imageLitSlab[imageSlabIdx*litSize : (imageSlabIdx+1)*litSize : (imageSlabIdx+1)*litSize]
+		imageSlabIdx++
 		dst.copyFrom(h)
 		imageHisto.histos = append(imageHisto.histos, dst)
 	}

@@ -250,8 +250,10 @@ func copyImageWithPrediction(argb []uint32, width, height, bits int, modes []uin
 
 	// Scratch buffers: width+1 to allow the top-right pixel to wrap to the
 	// leftmost pixel of the next row when at the right edge.
-	upperRow := make([]uint32, width+1)
-	currentRow := make([]uint32, width+1)
+	// Fused into a single allocation.
+	rowBuf := make([]uint32, 2*(width+1))
+	upperRow := rowBuf[:width+1]
+	currentRow := rowBuf[width+1:]
 
 	for y := 0; y < height; y++ {
 		// Swap: previous currentRow becomes upperRow.
@@ -417,7 +419,9 @@ func applyColorTransformPixel(m Multipliers, argb uint32) uint32 {
 
 // findBestMultipliers finds the best cross-color multipliers for a tile
 // by minimizing the absolute sum of residuals over a sparse search.
-func findBestMultipliers(argb []uint32, width, height, tx, ty, bits int) Multipliers {
+// scratch must have length >= 5 * maxTilePixels (greens, reds, blues,
+// adjustedReds, adjustedBlues). If nil, buffers are allocated.
+func findBestMultipliers(argb []uint32, width, height, tx, ty, bits int, scratch []int32) Multipliers {
 	tileSize := 1 << bits
 	xStart := tx * tileSize
 	yStart := ty * tileSize
@@ -430,26 +434,42 @@ func findBestMultipliers(argb []uint32, width, height, tx, ty, bits int) Multipl
 		yEnd = height
 	}
 
+	maxPixels := (xEnd - xStart) * (yEnd - yStart)
+	if maxPixels == 0 {
+		return Multipliers{}
+	}
+
+	// Use scratch buffer for all 5 arrays: greens, reds, blues, adjustedReds, adjustedBlues.
+	needed := 5 * maxPixels
+	if len(scratch) < needed {
+		scratch = make([]int32, needed)
+	}
+	greens := scratch[:maxPixels]
+	reds := scratch[maxPixels : 2*maxPixels]
+	blues := scratch[2*maxPixels : 3*maxPixels]
+	adjustedReds := scratch[3*maxPixels : 4*maxPixels]
+	adjustedBlues := scratch[4*maxPixels : 5*maxPixels]
+
 	// Collect green, red, blue samples from the tile.
-	var greens, reds, blues []int32
+	n := 0
 	for y := yStart; y < yEnd; y++ {
 		for x := xStart; x < xEnd; x++ {
 			px := argb[y*width+x]
-			greens = append(greens, int32(int8(px>>8)))
-			reds = append(reds, int32(uint8(px>>16)))
-			blues = append(blues, int32(uint8(px)))
+			greens[n] = int32(int8(px >> 8))
+			reds[n] = int32(uint8(px >> 16))
+			blues[n] = int32(uint8(px))
+			n++
 		}
 	}
-
-	if len(greens) == 0 {
-		return Multipliers{}
-	}
+	greens = greens[:n]
+	reds = reds[:n]
+	blues = blues[:n]
 
 	// Search for greenToRed that minimizes sum of |red - (greenToRed * green >> 5)|.
 	bestGreenToRed := findBestMultiplier(greens, reds)
 
 	// Compute adjusted reds after greenToRed correction.
-	adjustedReds := make([]int32, len(reds))
+	adjustedReds = adjustedReds[:n]
 	for i, r := range reds {
 		adjustedReds[i] = (r - int32(encColorTransformDelta(bestGreenToRed, uint8(greens[i])))) & 0xff
 	}
@@ -458,7 +478,7 @@ func findBestMultipliers(argb []uint32, width, height, tx, ty, bits int) Multipl
 	bestGreenToBlue := findBestMultiplier(greens, blues)
 
 	// Search for redToBlue using adjusted reds.
-	adjustedBlues := make([]int32, len(blues))
+	adjustedBlues = adjustedBlues[:n]
 	for i, b := range blues {
 		adjustedBlues[i] = (b - int32(encColorTransformDelta(bestGreenToBlue, uint8(greens[i])))) & 0xff
 	}
@@ -528,9 +548,14 @@ func ColorSpaceTransform(argb []uint32, width, height, bits, quality int) []uint
 	tileYSize := VP8LSubSampleSize(height, bits)
 	transformData := make([]uint32, tileXSize*tileYSize)
 
+	// Pre-allocate scratch buffer for findBestMultipliers (5 arrays * max tile pixels).
+	tileSize := 1 << bits
+	maxTilePixels := tileSize * tileSize
+	scratch := make([]int32, 5*maxTilePixels)
+
 	for ty := 0; ty < tileYSize; ty++ {
 		for tx := 0; tx < tileXSize; tx++ {
-			m := findBestMultipliers(argb, width, height, tx, ty, bits)
+			m := findBestMultipliers(argb, width, height, tx, ty, bits, scratch)
 			transformData[ty*tileXSize+tx] = packMultipliers(m)
 			applyColorTransformTile(argb, width, height, tx, ty, bits, m)
 		}

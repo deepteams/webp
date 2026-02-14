@@ -386,13 +386,43 @@ func CalculateBestCacheSize(argb []uint32, quality int, refs *BackwardRefs, cach
 	}
 
 	// Allocate one histogram and one color cache per candidate cache size.
-	histos := make([]*Histogram, cacheBitsMax+1)
-	caches := make([]*ColorCache, cacheBitsMax+1)
-	for i := 0; i <= cacheBitsMax; i++ {
-		histos[i] = NewHistogram(i)
-		if i > 0 {
-			caches[i] = NewColorCache(i)
-		}
+	// Slab-allocate histogram structs and color cache structs to reduce allocs.
+	numHistos := cacheBitsMax + 1
+	histos := make([]*Histogram, numHistos)
+	histoSlab := make([]Histogram, numHistos)
+
+	// Each histogram has a different literal size, so compute total and allocate one slab.
+	totalLitSize := 0
+	for i := 0; i < numHistos; i++ {
+		totalLitSize += histogramNumCodes(i)
+	}
+	litSlab := make([]uint32, totalLitSize)
+	litOff := 0
+	for i := 0; i < numHistos; i++ {
+		ls := histogramNumCodes(i)
+		histoSlab[i].Literal = litSlab[litOff : litOff+ls : litOff+ls]
+		histoSlab[i].paletteCodeBits = i
+		histoSlab[i].resetStats()
+		histos[i] = &histoSlab[i]
+		litOff += ls
+	}
+
+	caches := make([]*ColorCache, numHistos)
+	cacheSlab := make([]ColorCache, numHistos)
+	// Total color cache entries: sum of 2^i for i=1..cacheBitsMax
+	totalCacheSize := 0
+	for i := 1; i < numHistos; i++ {
+		totalCacheSize += 1 << i
+	}
+	colorSlab := make([]uint32, totalCacheSize)
+	colorOff := 0
+	for i := 1; i < numHistos; i++ {
+		sz := 1 << i
+		cacheSlab[i].Colors = colorSlab[colorOff : colorOff+sz : colorOff+sz]
+		cacheSlab[i].HashShift = 32 - i
+		cacheSlab[i].HashBits = i
+		caches[i] = &cacheSlab[i]
+		colorOff += sz
 	}
 
 	// Walk through the backward references once, updating all histograms
@@ -555,6 +585,14 @@ func BackwardRefsWithLocalCache(argb []uint32, cacheBits int, refs *BackwardRefs
 //   5. Optionally applies TraceBackwards for high quality
 //
 // lz77Types is a bitmask of kLZ77Standard, kLZ77RLE, and kLZ77Box.
+// BackwardRefsScratch holds optional pre-allocated buffers for GetBackwardReferences.
+type BackwardRefsScratch struct {
+	Candidate *BackwardRefs // temporary candidate refs
+	Trace     *BackwardRefs // trace result refs
+	DistArray []uint16      // dist array for TraceBackwards
+	Histo     *Histogram    // scratch histogram for cost estimation
+}
+
 func GetBackwardReferences(
 	width, height int,
 	argb []uint32,
@@ -564,18 +602,47 @@ func GetBackwardReferences(
 	hc *HashChain,
 	best *BackwardRefs,
 ) int {
+	return GetBackwardReferencesWithScratch(width, height, argb, quality,
+		lz77Types, cacheBitsMax, hc, best, nil)
+}
+
+func GetBackwardReferencesWithScratch(
+	width, height int,
+	argb []uint32,
+	quality int,
+	lz77Types int,
+	cacheBitsMax int,
+	hc *HashChain,
+	best *BackwardRefs,
+	scratch *BackwardRefsScratch,
+) int {
 	bestCost := uint64(math.MaxUint64)
 	bestLz77Type := 0
 
-	// Temporary buffer for candidate results.
-	candidate := NewBackwardRefs(width * height)
+	pixCount := width * height
+
+	// Use scratch buffers if provided, otherwise allocate.
+	var candidate *BackwardRefs
+	var histoScratch *Histogram
+	if scratch != nil {
+		candidate = scratch.Candidate
+		histoScratch = scratch.Histo
+	}
+	if candidate == nil {
+		candidate = NewBackwardRefs(pixCount)
+	} else {
+		candidate.Reset()
+	}
+	if histoScratch == nil {
+		histoScratch = NewHistogram(cacheBitsMax)
+	}
 
 	// Phase 1: Try each LZ77 strategy with cacheBits=0 to find the best one.
 	// The C reference runs all strategies without cache first, then applies
 	// the cache in a separate pass.
 	if lz77Types&kLZ77Standard != 0 {
 		BackwardReferencesLz77(width, height, argb, 0, hc, candidate)
-		cost := histogramEstimateBitsFromRefs(candidate, 0)
+		cost := histogramEstimateBitsFromRefsScratch(candidate, 0, histoScratch)
 		if cost < bestCost {
 			bestCost = cost
 			bestLz77Type = kLZ77Standard
@@ -585,7 +652,7 @@ func GetBackwardReferences(
 
 	if lz77Types&kLZ77RLE != 0 {
 		BackwardReferencesRle(width, height, argb, 0, candidate)
-		cost := histogramEstimateBitsFromRefs(candidate, 0)
+		cost := histogramEstimateBitsFromRefsScratch(candidate, 0, histoScratch)
 		if cost < bestCost {
 			bestCost = cost
 			bestLz77Type = kLZ77RLE
@@ -595,7 +662,7 @@ func GetBackwardReferences(
 
 	if lz77Types&kLZ77Box != 0 {
 		BackwardReferencesLz77Box(width, height, argb, 0, hc, candidate)
-		cost := histogramEstimateBitsFromRefs(candidate, 0)
+		cost := histogramEstimateBitsFromRefsScratch(candidate, 0, histoScratch)
 		if cost < bestCost {
 			bestCost = cost
 			bestLz77Type = kLZ77Box
@@ -613,15 +680,33 @@ func GetBackwardReferences(
 	}
 
 	// Recompute cost with the chosen cache bits.
-	bestCost = histogramEstimateBitsFromRefs(best, bestCacheBits)
+	bestCost = histogramEstimateBitsFromRefsScratch(best, bestCacheBits, histoScratch)
 
 	// Phase 4: Improve on simple LZ77 using TraceBackwards for high quality,
 	// matching the C reference threshold (quality >= 25).
 	if (bestLz77Type == kLZ77Standard || bestLz77Type == kLZ77Box) && quality >= 25 {
-		traceResult := NewBackwardRefs(width * height)
-		if BackwardReferencesTraceBackwards(width, height, argb, bestCacheBits,
-			hc, best, traceResult) {
-			traceCost := histogramEstimateBitsFromRefs(traceResult, bestCacheBits)
+		var traceResult *BackwardRefs
+		var distArray []uint16
+		if scratch != nil {
+			traceResult = scratch.Trace
+			distArray = scratch.DistArray
+		}
+		if traceResult == nil {
+			traceResult = NewBackwardRefs(pixCount)
+		} else {
+			traceResult.Reset()
+		}
+		if len(distArray) < pixCount {
+			distArray = make([]uint16, pixCount)
+		} else {
+			distArray = distArray[:pixCount]
+			for i := range distArray {
+				distArray[i] = 0
+			}
+		}
+		if backwardReferencesTraceBackwardsWithDist(width, height, argb, bestCacheBits,
+			hc, best, traceResult, distArray) {
+			traceCost := histogramEstimateBitsFromRefsScratch(traceResult, bestCacheBits, histoScratch)
 			if traceCost < bestCost {
 				bestCost = traceCost
 				copyRefs(best, traceResult)
@@ -639,10 +724,21 @@ func GetBackwardReferences(
 // histogramEstimateBitsFromRefs builds a histogram from backward references
 // and returns the estimated bit cost as a uint64.
 func histogramEstimateBitsFromRefs(refs *BackwardRefs, cacheBits int) uint64 {
+	return histogramEstimateBitsFromRefsScratch(refs, cacheBits, nil)
+}
+
+// histogramEstimateBitsFromRefsScratch is like histogramEstimateBitsFromRefs
+// but accepts an optional pre-allocated scratch histogram to avoid allocation.
+func histogramEstimateBitsFromRefsScratch(refs *BackwardRefs, cacheBits int, scratch *Histogram) uint64 {
 	if refs.Len() == 0 {
 		return math.MaxUint64
 	}
-	h := NewHistogram(cacheBits)
+	h := scratch
+	if h == nil || len(h.Literal) < histogramNumCodes(cacheBits) {
+		h = NewHistogram(cacheBits)
+	} else {
+		h.Clear()
+	}
 	h.AddRefs(refs, 0, cacheBits)
 	return histogramEstimateBitsUint64(h)
 }
@@ -1295,6 +1391,18 @@ func BackwardReferencesTraceBackwards(
 ) bool {
 	distArraySize := xsize * ysize
 	distArray := make([]uint16, distArraySize)
+	return backwardReferencesTraceBackwardsWithDist(xsize, ysize, argb, cacheBits,
+		hc, refsSrc, refsDst, distArray)
+}
+
+// backwardReferencesTraceBackwardsWithDist is like BackwardReferencesTraceBackwards
+// but accepts a pre-allocated distArray to avoid allocation.
+func backwardReferencesTraceBackwardsWithDist(
+	xsize, ysize int, argb []uint32, cacheBits int,
+	hc *HashChain, refsSrc *BackwardRefs, refsDst *BackwardRefs,
+	distArray []uint16,
+) bool {
+	distArraySize := xsize * ysize
 
 	if !backwardReferencesHashChainDistanceOnly(
 		xsize, ysize, argb, cacheBits, hc, refsSrc, distArray) {

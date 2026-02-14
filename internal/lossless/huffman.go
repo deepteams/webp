@@ -60,7 +60,20 @@ var (
 //
 // This is a pure-Go port of libwebp's static BuildHuffmanTable in
 // huffman_utils.c.
+// HuffmanTableScratch holds optional pre-allocated buffers for BuildHuffmanTable.
+type HuffmanTableScratch struct {
+	sorted    []uint16     // reusable sorted symbols buffer
+	tableSlab []HuffmanCode // slab for table allocation
+	slabOff   int           // current offset in slab
+}
+
 func BuildHuffmanTable(rootBits int, codeLengths []int) ([]HuffmanCode, error) {
+	return BuildHuffmanTableScratch(rootBits, codeLengths, nil)
+}
+
+// BuildHuffmanTableScratch is like BuildHuffmanTable but accepts optional
+// scratch buffers to reduce allocations.
+func BuildHuffmanTableScratch(rootBits int, codeLengths []int, scratch *HuffmanTableScratch) ([]HuffmanCode, error) {
 	codeLengthsSize := len(codeLengths)
 	if codeLengthsSize == 0 {
 		return nil, ErrEmptyCodeLengths
@@ -72,10 +85,32 @@ func BuildHuffmanTable(rootBits int, codeLengths []int) ([]HuffmanCode, error) {
 		return nil, ErrInvalidTree
 	}
 
-	table := make([]HuffmanCode, totalSize)
+	// Allocate table from slab if available, otherwise make a new slice.
+	var table []HuffmanCode
+	if scratch != nil && scratch.slabOff+totalSize <= len(scratch.tableSlab) {
+		table = scratch.tableSlab[scratch.slabOff : scratch.slabOff+totalSize : scratch.slabOff+totalSize]
+		scratch.slabOff += totalSize
+		// Zero out reused slab segment.
+		for i := range table {
+			table[i] = HuffmanCode{}
+		}
+	} else {
+		table = make([]HuffmanCode, totalSize)
+	}
 
-	// Sort symbols by code length.
-	sorted := make([]uint16, codeLengthsSize)
+	// Sort symbols by code length. Reuse buffer if available.
+	var sorted []uint16
+	if scratch != nil && cap(scratch.sorted) >= codeLengthsSize {
+		sorted = scratch.sorted[:codeLengthsSize]
+		for i := range sorted {
+			sorted[i] = 0
+		}
+	} else {
+		sorted = make([]uint16, codeLengthsSize)
+		if scratch != nil {
+			scratch.sorted = sorted
+		}
+	}
 
 	var count [MaxAllowedCodeLength + 1]int
 	for _, cl := range codeLengths {

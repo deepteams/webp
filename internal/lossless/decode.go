@@ -41,6 +41,10 @@ type Decoder struct {
 	transforms     [NumTransforms]Transform
 	nextTransform  int
 	transformsSeen uint32
+
+	// Reusable scratch buffers for Huffman decoding.
+	codeLengthsBuf []int             // reusable buffer for readHuffmanCode
+	huffScratch    HuffmanTableScratch // slab allocator for Huffman tables
 }
 
 // metadata holds the Huffman-related state for the current decode level.
@@ -62,6 +66,14 @@ func DecodeVP8L(data []byte) (*image.NRGBA, error) {
 	if err := dec.decodeHeader(data); err != nil {
 		return nil, err
 	}
+
+	// Pre-allocate the Huffman table slab. 64K entries covers most images;
+	// BuildHuffmanTableScratch falls back to make() if the slab is exhausted.
+	const huffSlabSize = 1 << 16
+	if cap(dec.huffScratch.tableSlab) < huffSlabSize {
+		dec.huffScratch.tableSlab = make([]HuffmanCode, huffSlabSize)
+	}
+	dec.huffScratch.slabOff = 0
 
 	// Decode the full image stream (level-0). This reads transforms,
 	// color cache, and Huffman codes. After this call, dec.transformWidth

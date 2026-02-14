@@ -3,9 +3,51 @@ package lossless
 import (
 	"errors"
 	"sort"
+	"sync"
 
 	"github.com/deepteams/webp/internal/bitio"
 )
+
+// losslessEncoderPool reuses Encoder structs across successive lossless
+// encode calls. On reuse (same or smaller image), all internal scratch
+// buffers (hashChain, backwardRefs, distArray, huffmanScratch) are retained,
+// eliminating most allocations after the first call.
+var losslessEncoderPool = sync.Pool{
+	New: func() any { return &Encoder{} },
+}
+
+// acquireEncoder returns an Encoder from the pool, resetting it for a new encode.
+func acquireEncoder(width, height int, config *EncoderConfig) *Encoder {
+	enc := losslessEncoderPool.Get().(*Encoder)
+	enc.config = config
+	enc.width = width
+	enc.height = height
+	enc.currentWidth = width
+	enc.argbOrig = nil
+	enc.transforms = enc.transforms[:0]
+	enc.usePalette = false
+	enc.paletteSize = 0
+	enc.palette = nil
+	enc.predictorBits = 0
+	enc.crossColorBits = 0
+	enc.histogramBits = 0
+	enc.cacheBits = 0
+	enc.useSubtractGreen = false
+	enc.usePredict = false
+	enc.useCrossColor = false
+	return enc
+}
+
+// releaseEncoder returns an Encoder to the pool for reuse.
+func releaseEncoder(enc *Encoder) {
+	// Clear references to image data so it can be GC'd.
+	enc.argb = nil
+	enc.argbOrig = nil
+	enc.config = nil
+	enc.palette = nil
+	enc.transforms = enc.transforms[:0]
+	losslessEncoderPool.Put(enc)
+}
 
 // VP8L lossless encoder entry point.
 //
@@ -64,6 +106,14 @@ type Encoder struct {
 	useSubtractGreen bool
 	usePredict       bool
 	useCrossColor    bool
+
+	// Reusable scratch buffers (reduce allocations across encodes).
+	hashChain      *HashChain       // reusable hash chain
+	bestRefs       *BackwardRefs    // reusable backward refs (best)
+	candidateRefs  *BackwardRefs    // reusable backward refs (candidate)
+	traceRefs      *BackwardRefs    // reusable backward refs (trace result)
+	traceDistArray []uint16         // reusable dist array for TraceBackwards
+	huffScratch    *HuffmanScratch  // reusable Huffman tree scratch buffers
 }
 
 // Errors.
@@ -90,15 +140,17 @@ func Encode(argb []uint32, width, height int, config *EncoderConfig) ([]byte, er
 		config = DefaultEncoderConfig()
 	}
 
-	enc := &Encoder{
-		config:       config,
-		width:        width,
-		height:       height,
-		currentWidth: width,
-	}
+	enc := acquireEncoder(width, height, config)
+	defer releaseEncoder(enc)
 
 	// Copy the pixel data since transforms modify it in place.
-	enc.argb = make([]uint32, len(argb))
+	// Reuse the argb buffer if it has sufficient capacity.
+	pixelCount := len(argb)
+	if cap(enc.argb) >= pixelCount {
+		enc.argb = enc.argb[:pixelCount]
+	} else {
+		enc.argb = make([]uint32, pixelCount)
+	}
 	copy(enc.argb, argb)
 
 	// Analyze image.
@@ -371,31 +423,63 @@ func (enc *Encoder) encodeStream() ([]byte, error) {
 	// No more transforms.
 	bw.WriteBits(0, 1)
 
-	// Build hash chain.
+	// Build hash chain (reuse if capacity is sufficient).
 	pixelCount := currentWidth * height
-	hc := NewHashChain(pixelCount)
+	hc := enc.hashChain
+	if hc == nil || hc.size < pixelCount {
+		hc = NewHashChain(pixelCount)
+		enc.hashChain = hc
+	} else {
+		for i := 0; i < pixelCount; i++ {
+			hc.OffsetLength[i] = 0
+		}
+	}
 	hc.Fill(enc.argb, quality, currentWidth, height, quality < 25)
 
-	// Get backward references.
-	refs := NewBackwardRefs(pixelCount)
+	// Get backward references (reuse buffers if available).
+	if enc.bestRefs == nil {
+		enc.bestRefs = NewBackwardRefs(pixelCount)
+	} else {
+		enc.bestRefs.Reset()
+	}
+	refs := enc.bestRefs
 	lz77Types := kLZ77Standard | kLZ77RLE | kLZ77Box
-	cacheBits := GetBackwardReferences(currentWidth, height, enc.argb,
-		quality, lz77Types, enc.cacheBits, hc, refs)
+
+	// Prepare scratch buffers for GetBackwardReferences.
+	if enc.candidateRefs == nil {
+		enc.candidateRefs = NewBackwardRefs(pixelCount)
+	}
+	if enc.traceRefs == nil {
+		enc.traceRefs = NewBackwardRefs(pixelCount)
+	}
+	if len(enc.traceDistArray) < pixelCount {
+		enc.traceDistArray = make([]uint16, pixelCount)
+	}
+	brScratch := &BackwardRefsScratch{
+		Candidate: enc.candidateRefs,
+		Trace:     enc.traceRefs,
+		DistArray: enc.traceDistArray,
+	}
+	cacheBits := GetBackwardReferencesWithScratch(currentWidth, height, enc.argb,
+		quality, lz77Types, enc.cacheBits, hc, refs, brScratch)
 
 	// Build histograms and get symbols.
 	symbols, histoSet := GetHistoImageSymbols(
 		currentWidth, height, refs, quality, enc.histogramBits, cacheBits)
 
 	// Build Huffman codes for each histogram.
+	if enc.huffScratch == nil {
+		enc.huffScratch = &HuffmanScratch{}
+	}
 	numHistos := histoSet.Size()
 	huffCodes := make([][HuffmanCodesPerMetaCode]*HuffmanTreeCode, numHistos)
 	for i := 0; i < numHistos; i++ {
 		h := histoSet.Get(i)
-		huffCodes[i][0] = CreateHuffmanTree(h.Literal, MaxAllowedCodeLength)
-		huffCodes[i][1] = CreateHuffmanTree(h.Red[:], MaxAllowedCodeLength)
-		huffCodes[i][2] = CreateHuffmanTree(h.Blue[:], MaxAllowedCodeLength)
-		huffCodes[i][3] = CreateHuffmanTree(h.Alpha[:], MaxAllowedCodeLength)
-		huffCodes[i][4] = CreateHuffmanTree(h.Distance[:], MaxAllowedCodeLength)
+		huffCodes[i][0] = CreateHuffmanTreeScratch(h.Literal, MaxAllowedCodeLength, enc.huffScratch)
+		huffCodes[i][1] = CreateHuffmanTreeScratch(h.Red[:], MaxAllowedCodeLength, enc.huffScratch)
+		huffCodes[i][2] = CreateHuffmanTreeScratch(h.Blue[:], MaxAllowedCodeLength, enc.huffScratch)
+		huffCodes[i][3] = CreateHuffmanTreeScratch(h.Alpha[:], MaxAllowedCodeLength, enc.huffScratch)
+		huffCodes[i][4] = CreateHuffmanTreeScratch(h.Distance[:], MaxAllowedCodeLength, enc.huffScratch)
 	}
 
 	// Write color cache parameters.
@@ -449,7 +533,7 @@ func (enc *Encoder) encodeStream() ([]byte, error) {
 	// Write Huffman codes.
 	for i := 0; i < numHistos; i++ {
 		for j := 0; j < HuffmanCodesPerMetaCode; j++ {
-			StoreHuffmanCode(bw, huffCodes[i][j])
+			StoreHuffmanCodeScratch(bw, huffCodes[i][j], enc.huffScratch)
 			clearHuffmanTreeIfOnlyOneSymbol(huffCodes[i][j])
 		}
 	}
@@ -494,13 +578,26 @@ func (enc *Encoder) encodeSubImage(bw *bitio.LosslessWriter, data []uint32, widt
 	pixelCount := width * height
 	quality := enc.config.Quality
 
-	// Build hash chain from the sub-image pixel data.
-	hc := NewHashChain(pixelCount)
+	// Build hash chain from the sub-image pixel data (reuse if capacity sufficient).
+	hc := enc.hashChain
+	if hc == nil || hc.size < pixelCount {
+		hc = NewHashChain(pixelCount)
+		enc.hashChain = hc
+	} else {
+		for i := 0; i < pixelCount; i++ {
+			hc.OffsetLength[i] = 0
+		}
+	}
 	hc.Fill(data, quality, width, height, quality < 25)
 
 	// Generate backward references using LZ77 standard + RLE strategies.
 	// cache_bits = 0 (no color cache for sub-images), matching C reference.
-	refs := NewBackwardRefs(pixelCount)
+	if enc.candidateRefs == nil {
+		enc.candidateRefs = NewBackwardRefs(pixelCount)
+	} else {
+		enc.candidateRefs.Reset()
+	}
+	refs := enc.candidateRefs
 	cacheBits := 0
 	lz77Types := kLZ77Standard | kLZ77RLE
 	GetBackwardReferences(width, height, data, quality, lz77Types, cacheBits, hc, refs)
@@ -510,12 +607,15 @@ func (enc *Encoder) encodeSubImage(bw *bitio.LosslessWriter, data []uint32, widt
 	h.AddRefs(refs, width, 0)
 
 	// Build Huffman codes from the histogram.
+	if enc.huffScratch == nil {
+		enc.huffScratch = &HuffmanScratch{}
+	}
 	codes := [HuffmanCodesPerMetaCode]*HuffmanTreeCode{
-		CreateHuffmanTree(h.Literal, MaxAllowedCodeLength),
-		CreateHuffmanTree(h.Red[:], MaxAllowedCodeLength),
-		CreateHuffmanTree(h.Blue[:], MaxAllowedCodeLength),
-		CreateHuffmanTree(h.Alpha[:], MaxAllowedCodeLength),
-		CreateHuffmanTree(h.Distance[:], MaxAllowedCodeLength),
+		CreateHuffmanTreeScratch(h.Literal, MaxAllowedCodeLength, enc.huffScratch),
+		CreateHuffmanTreeScratch(h.Red[:], MaxAllowedCodeLength, enc.huffScratch),
+		CreateHuffmanTreeScratch(h.Blue[:], MaxAllowedCodeLength, enc.huffScratch),
+		CreateHuffmanTreeScratch(h.Alpha[:], MaxAllowedCodeLength, enc.huffScratch),
+		CreateHuffmanTreeScratch(h.Distance[:], MaxAllowedCodeLength, enc.huffScratch),
 	}
 
 	// No color cache for sub-images. Matches the C reference
@@ -527,7 +627,7 @@ func (enc *Encoder) encodeSubImage(bw *bitio.LosslessWriter, data []uint32, widt
 
 	// Store Huffman codes.
 	for j := 0; j < HuffmanCodesPerMetaCode; j++ {
-		StoreHuffmanCode(bw, codes[j])
+		StoreHuffmanCodeScratch(bw, codes[j], enc.huffScratch)
 		clearHuffmanTreeIfOnlyOneSymbol(codes[j])
 	}
 

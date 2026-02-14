@@ -9,7 +9,18 @@ package lossless
 // readHuffmanCodeLengths decodes Huffman-coded code lengths using a previously
 // built code-lengths Huffman table.
 func (dec *Decoder) readHuffmanCodeLengths(clTable []HuffmanCode, numSymbols int) ([]int, error) {
-	codeLengths := make([]int, numSymbols)
+	// This returns a new slice because readHuffmanCode will use it as the final
+	// codeLengths. Reuse the decoder's buffer if large enough.
+	var codeLengths []int
+	if cap(dec.codeLengthsBuf) >= numSymbols {
+		codeLengths = dec.codeLengthsBuf[:numSymbols]
+		for i := range codeLengths {
+			codeLengths[i] = 0
+		}
+	} else {
+		codeLengths = make([]int, numSymbols)
+		dec.codeLengthsBuf = codeLengths
+	}
 	prevCodeLen := DefaultCodeLength
 
 	maxSymbol := numSymbols
@@ -73,7 +84,17 @@ func (dec *Decoder) readHuffmanCodeLengths(clTable []HuffmanCode, numSymbols int
 func (dec *Decoder) readHuffmanCode(alphabetSize int) ([]HuffmanCode, int, error) {
 	simpleCode := dec.br.ReadBits(1)
 
-	codeLengths := make([]int, alphabetSize)
+	// Reuse codeLengths buffer if large enough.
+	var codeLengths []int
+	if cap(dec.codeLengthsBuf) >= alphabetSize {
+		codeLengths = dec.codeLengthsBuf[:alphabetSize]
+		for i := range codeLengths {
+			codeLengths[i] = 0
+		}
+	} else {
+		codeLengths = make([]int, alphabetSize)
+		dec.codeLengthsBuf = codeLengths
+	}
 
 	if simpleCode == 1 {
 		// Simple code: 1 or 2 symbols encoded directly.
@@ -109,7 +130,9 @@ func (dec *Decoder) readHuffmanCode(alphabetSize int) ([]HuffmanCode, int, error
 		}
 
 		// Build the code-lengths Huffman table.
-		clTable, err := BuildHuffmanTable(LengthsTableBits, clCodeLengths[:])
+		// Code-length tables are small (LengthsTableBits=7, max ~128 entries),
+		// not worth slab-allocating.
+		clTable, err := BuildHuffmanTableScratch(LengthsTableBits, clCodeLengths[:], dec.huffTableScratch())
 		if err != nil {
 			return nil, 0, err
 		}
@@ -133,11 +156,16 @@ func (dec *Decoder) readHuffmanCode(alphabetSize int) ([]HuffmanCode, int, error
 		}
 	}
 
-	table, err := BuildHuffmanTable(HuffmanTableBits, codeLengths)
+	table, err := BuildHuffmanTableScratch(HuffmanTableBits, codeLengths, dec.huffTableScratch())
 	if err != nil {
 		return nil, 0, err
 	}
 	return table, maxCodeLen, nil
+}
+
+// huffTableScratch returns the decoder's reusable HuffmanTableScratch.
+func (dec *Decoder) huffTableScratch() *HuffmanTableScratch {
+	return &dec.huffScratch
 }
 
 // readHuffmanCodes reads the Huffman meta-image (if present) and all

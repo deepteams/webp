@@ -377,15 +377,9 @@ func (dec *Decoder) parsePartitions(buf []byte) error {
 func (dec *Decoder) initFrame() error {
 	mbW := dec.mbW
 
-	dec.intraT = make([]uint8, 4*mbW)
-	for i := range dec.intraT {
-		dec.intraT[i] = BDCPred
-	}
-
 	dec.yuvT = make([]TopSamples, mbW)
 	dec.mbInfo = make([]MB, mbW+1) // index 0 is the left sentinel
 	dec.fInfo = make([]FInfo, mbW)
-	dec.yuvB = make([]byte, YUVSize)
 	dec.mbData = make([]MBData, mbW)
 
 	// Output cache: single row of macroblocks.
@@ -393,9 +387,33 @@ func (dec *Decoder) initFrame() error {
 	dec.cacheUVStride = 8 * mbW
 
 	totalRows := dec.mbH
-	dec.cacheY = make([]byte, totalRows*16*dec.cacheYStride)
-	dec.cacheU = make([]byte, totalRows*8*dec.cacheUVStride)
-	dec.cacheV = make([]byte, totalRows*8*dec.cacheUVStride)
+
+	// Consolidate byte buffers into a single slab: intraT + yuvB + cacheY + cacheU + cacheV.
+	intraTSize := 4 * mbW
+	yuvBSize := YUVSize
+	cacheYSize := totalRows * 16 * dec.cacheYStride
+	cacheUSize := totalRows * 8 * dec.cacheUVStride
+	cacheVSize := cacheUSize
+	slabSize := intraTSize + yuvBSize + cacheYSize + cacheUSize + cacheVSize
+	slab := make([]byte, slabSize)
+
+	off := 0
+	dec.intraT = slab[off : off+intraTSize]
+	for i := range dec.intraT {
+		dec.intraT[i] = BDCPred
+	}
+	off += intraTSize
+
+	dec.yuvB = slab[off : off+yuvBSize]
+	off += yuvBSize
+
+	dec.cacheY = slab[off : off+cacheYSize]
+	off += cacheYSize
+
+	dec.cacheU = slab[off : off+cacheUSize]
+	off += cacheUSize
+
+	dec.cacheV = slab[off : off+cacheVSize]
 
 	// Crop/filter bounds default to full image.
 	dec.tlMBX = 0

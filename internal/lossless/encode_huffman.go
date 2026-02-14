@@ -1,9 +1,6 @@
 package lossless
 
 import (
-	"container/heap"
-	"sort"
-
 	"github.com/deepteams/webp/internal/bitio"
 )
 
@@ -38,6 +35,8 @@ type huffmanTreeNode struct {
 // Priority queue for tree construction
 // ---------------------------------------------------------------------------
 
+// nodeHeap is a min-heap of pool indices, ordered by (totalCount, index).
+// Implemented inline to avoid container/heap interface boxing allocations.
 type nodeHeap struct {
 	pool    []huffmanTreeNode
 	indices []int // indices into pool
@@ -45,7 +44,7 @@ type nodeHeap struct {
 
 func (h *nodeHeap) Len() int { return len(h.indices) }
 
-func (h *nodeHeap) Less(i, j int) bool {
+func (h *nodeHeap) less(i, j int) bool {
 	a, b := h.pool[h.indices[i]], h.pool[h.indices[j]]
 	if a.totalCount != b.totalCount {
 		return a.totalCount < b.totalCount
@@ -53,30 +52,84 @@ func (h *nodeHeap) Less(i, j int) bool {
 	return h.indices[i] < h.indices[j]
 }
 
-func (h *nodeHeap) Swap(i, j int) {
+func (h *nodeHeap) swap(i, j int) {
 	h.indices[i], h.indices[j] = h.indices[j], h.indices[i]
 }
 
-func (h *nodeHeap) Push(x any) {
-	h.indices = append(h.indices, x.(int))
+func (h *nodeHeap) push(idx int) {
+	h.indices = append(h.indices, idx)
+	// Sift up.
+	i := len(h.indices) - 1
+	for i > 0 {
+		parent := (i - 1) / 2
+		if !h.less(i, parent) {
+			break
+		}
+		h.swap(i, parent)
+		i = parent
+	}
 }
 
-func (h *nodeHeap) Pop() any {
-	old := h.indices
-	n := len(old)
-	idx := old[n-1]
-	h.indices = old[:n-1]
+func (h *nodeHeap) pop() int {
+	n := len(h.indices)
+	h.swap(0, n-1)
+	idx := h.indices[n-1]
+	h.indices = h.indices[:n-1]
+	// Sift down.
+	h.siftDown(0)
 	return idx
+}
+
+func (h *nodeHeap) siftDown(i int) {
+	n := len(h.indices)
+	for {
+		left := 2*i + 1
+		if left >= n {
+			break
+		}
+		smallest := left
+		if right := left + 1; right < n && h.less(right, left) {
+			smallest = right
+		}
+		if !h.less(smallest, i) {
+			break
+		}
+		h.swap(i, smallest)
+		i = smallest
+	}
+}
+
+func (h *nodeHeap) heapInit() {
+	n := len(h.indices)
+	for i := n/2 - 1; i >= 0; i-- {
+		h.siftDown(i)
+	}
 }
 
 // ---------------------------------------------------------------------------
 // CreateHuffmanTree builds canonical Huffman codes from a symbol histogram.
 // ---------------------------------------------------------------------------
 
+// HuffmanScratch holds reusable scratch buffers for Huffman tree building.
+// Note: codeLengths/codes are NOT shared because they persist in the returned
+// HuffmanTreeCode. Only truly temporary buffers are shared.
+type HuffmanScratch struct {
+	goodForRle []bool
+	tokens     []HuffmanTreeToken
+	treePool   []huffmanTreeNode // reusable node pool for buildTreeAndExtractLengths
+	treeIdx    []int             // reusable indices for nodeHeap
+}
+
 // CreateHuffmanTree builds a HuffmanTreeCode from the given histogram
 // (symbol frequencies). codeLengthLimit caps the maximum code length
 // (typically MaxAllowedCodeLength = 15).
 func CreateHuffmanTree(histogram []uint32, codeLengthLimit int) *HuffmanTreeCode {
+	return CreateHuffmanTreeScratch(histogram, codeLengthLimit, nil)
+}
+
+// CreateHuffmanTreeScratch is like CreateHuffmanTree but accepts optional
+// scratch buffers to reduce allocations.
+func CreateHuffmanTreeScratch(histogram []uint32, codeLengthLimit int, scratch *HuffmanScratch) *HuffmanTreeCode {
 	numSymbols := len(histogram)
 	tree := &HuffmanTreeCode{
 		NumSymbols:  numSymbols,
@@ -84,7 +137,7 @@ func CreateHuffmanTree(histogram []uint32, codeLengthLimit int) *HuffmanTreeCode
 		Codes:       make([]uint16, numSymbols),
 	}
 
-	// Count non-zero symbols and collect them.
+	// Count non-zero symbols.
 	type symCount struct {
 		symbol int
 		count  uint32
@@ -114,7 +167,7 @@ func CreateHuffmanTree(histogram []uint32, codeLengthLimit int) *HuffmanTreeCode
 	}
 
 	// General case: build a Huffman tree using a min-heap and extract depths.
-	buildTreeAndExtractLengths(histogram, numSymbols, codeLengthLimit, tree.CodeLengths)
+	buildTreeAndExtractLengths(histogram, numSymbols, codeLengthLimit, tree.CodeLengths, scratch)
 	generateCanonicalCodes(tree)
 	return tree
 }
@@ -123,7 +176,7 @@ func CreateHuffmanTree(histogram []uint32, codeLengthLimit int) *HuffmanTreeCode
 // and writes the resulting code lengths into codeLengths. If any code length
 // exceeds the limit, it doubles count_min and rebuilds, matching the C
 // reference GenerateOptimalTree in huffman_encode_utils.c.
-func buildTreeAndExtractLengths(histogram []uint32, numSymbols, limit int, codeLengths []uint8) {
+func buildTreeAndExtractLengths(histogram []uint32, numSymbols, limit int, codeLengths []uint8, scratch *HuffmanScratch) {
 	// Count non-zero symbols.
 	treeSize := 0
 	for i := 0; i < numSymbols; i++ {
@@ -136,6 +189,7 @@ func buildTreeAndExtractLengths(histogram []uint32, numSymbols, limit int, codeL
 	}
 
 	// Matching C: iterate with increasing count_min until depths fit.
+	maxNodes := 2*numSymbols + 1
 	for countMin := uint32(1); ; countMin *= 2 {
 		// Clear code lengths from any previous iteration.
 		for i := range codeLengths {
@@ -143,9 +197,27 @@ func buildTreeAndExtractLengths(histogram []uint32, numSymbols, limit int, codeL
 		}
 
 		// Build leaf nodes with counts clamped to at least count_min.
-		maxNodes := 2*numSymbols + 1
-		pool := make([]huffmanTreeNode, 0, maxNodes)
-		h := &nodeHeap{pool: pool}
+		// Reuse scratch pool and indices if available.
+		var pool []huffmanTreeNode
+		var indices []int
+		if scratch != nil && cap(scratch.treePool) >= maxNodes {
+			pool = scratch.treePool[:0]
+		} else {
+			pool = make([]huffmanTreeNode, 0, maxNodes)
+			if scratch != nil {
+				scratch.treePool = pool
+			}
+		}
+		if scratch != nil && cap(scratch.treeIdx) >= treeSize {
+			indices = scratch.treeIdx[:0]
+		} else {
+			indices = make([]int, 0, treeSize)
+			if scratch != nil {
+				scratch.treeIdx = indices
+			}
+		}
+
+		h := &nodeHeap{pool: pool, indices: indices}
 		for sym := 0; sym < numSymbols; sym++ {
 			if histogram[sym] != 0 {
 				count := histogram[sym]
@@ -166,15 +238,19 @@ func buildTreeAndExtractLengths(histogram []uint32, numSymbols, limit int, codeL
 		if len(h.indices) == 1 {
 			// Trivial case: single symbol.
 			codeLengths[h.pool[h.indices[0]].value] = 1
+			if scratch != nil {
+				scratch.treePool = h.pool
+				scratch.treeIdx = h.indices
+			}
 			return
 		}
 
-		heap.Init(h)
+		h.heapInit()
 
 		// Merge nodes until a single root remains.
 		for h.Len() > 1 {
-			leftIdx := heap.Pop(h).(int)
-			rightIdx := heap.Pop(h).(int)
+			leftIdx := h.pop()
+			rightIdx := h.pop()
 			parentIdx := len(h.pool)
 			h.pool = append(h.pool, huffmanTreeNode{
 				totalCount: h.pool[leftIdx].totalCount + h.pool[rightIdx].totalCount,
@@ -182,10 +258,16 @@ func buildTreeAndExtractLengths(histogram []uint32, numSymbols, limit int, codeL
 				left:       leftIdx,
 				right:      rightIdx,
 			})
-			heap.Push(h, parentIdx)
+			h.push(parentIdx)
 		}
 
 		rootIdx := h.indices[0]
+
+		// Save potentially grown slices back to scratch.
+		if scratch != nil {
+			scratch.treePool = h.pool
+			scratch.treeIdx = h.indices
+		}
 
 		// Walk the tree to extract code lengths.
 		assignCodeLengths(h.pool, rootIdx, 0, codeLengths)
@@ -226,7 +308,8 @@ func assignCodeLengths(pool []huffmanTreeNode, nodeIdx, depth int, codeLengths [
 // ---------------------------------------------------------------------------
 
 // generateCanonicalCodes computes bit-reversed canonical codes from the code
-// lengths stored in tree.CodeLengths.
+// lengths stored in tree.CodeLengths. Uses the RFC 1951 canonical code
+// algorithm with stack-allocated arrays (zero heap allocations).
 func generateCanonicalCodes(tree *HuffmanTreeCode) {
 	n := tree.NumSymbols
 
@@ -241,34 +324,31 @@ func generateCanonicalCodes(tree *HuffmanTreeCode) {
 		return
 	}
 
-	// Sort symbols by (code_length, symbol) for canonical assignment.
-	type symLen struct {
-		symbol int
-		length uint8
-	}
-	symbols := make([]symLen, 0, n)
-	for i := 0; i < n; i++ {
-		if tree.CodeLengths[i] > 0 {
-			symbols = append(symbols, symLen{i, tree.CodeLengths[i]})
+	// Count codes per length.
+	var blCount [MaxAllowedCodeLength + 1]int
+	for _, cl := range tree.CodeLengths {
+		if cl > 0 {
+			blCount[cl]++
 		}
 	}
-	sort.SliceStable(symbols, func(i, j int) bool {
-		if symbols[i].length != symbols[j].length {
-			return symbols[i].length < symbols[j].length
-		}
-		return symbols[i].symbol < symbols[j].symbol
-	})
 
-	// Assign canonical codes and bit-reverse them.
+	// Compute the first canonical code for each length.
+	var nextCode [MaxAllowedCodeLength + 1]uint32
+	blCount[0] = 0
 	code := uint32(0)
-	prevLen := uint8(0)
-	for _, s := range symbols {
-		if s.length > prevLen {
-			code <<= (s.length - prevLen)
-			prevLen = s.length
+	for bits := 1; bits <= maxLen; bits++ {
+		code = (code + uint32(blCount[bits-1])) << 1
+		nextCode[bits] = code
+	}
+
+	// Assign codes in symbol order (ascending), which is equivalent to
+	// sorting by (code_length, symbol) when using per-length counters.
+	for i := 0; i < n; i++ {
+		cl := tree.CodeLengths[i]
+		if cl > 0 {
+			tree.Codes[i] = reverseBits(nextCode[cl], int(cl))
+			nextCode[cl]++
 		}
-		tree.Codes[s.symbol] = reverseBits(code, int(s.length))
-		code++
 	}
 }
 
@@ -305,6 +385,12 @@ func valuesShouldBeCollapsedToStrideAverage(a, b uint32) bool {
 //     (>=5 for zeros, >=7 for non-zeros)
 //   - Step 3: collapse similar-valued strides using arithmetic mean
 func OptimizeHuffmanForRle(counts []uint32) []uint32 {
+	return OptimizeHuffmanForRleScratch(counts, nil)
+}
+
+// OptimizeHuffmanForRleScratch is like OptimizeHuffmanForRle but accepts
+// an optional pre-allocated bool buffer to avoid allocation.
+func OptimizeHuffmanForRleScratch(counts []uint32, goodForRleBuf []bool) []uint32 {
 	length := len(counts)
 	if length == 0 {
 		return counts
@@ -319,7 +405,15 @@ func OptimizeHuffmanForRle(counts []uint32) []uint32 {
 	}
 
 	// Step 2: mark positions that already form good RLE strides.
-	goodForRle := make([]bool, length)
+	var goodForRle []bool
+	if cap(goodForRleBuf) >= length {
+		goodForRle = goodForRleBuf[:length]
+		for i := range goodForRle {
+			goodForRle[i] = false
+		}
+	} else {
+		goodForRle = make([]bool, length)
+	}
 	{
 		symbol := counts[0]
 		stride := 0
@@ -397,8 +491,17 @@ func OptimizeHuffmanForRle(counts []uint32) []uint32 {
 //   - 17: repeat zero 3..10 times (3 extra bits)
 //   - 18: repeat zero 11..138 times (7 extra bits)
 func BuildCodeLengthTokens(codeLengths []uint8) []HuffmanTreeToken {
+	return BuildCodeLengthTokensScratch(codeLengths, nil)
+}
+
+// BuildCodeLengthTokensScratch is like BuildCodeLengthTokens but accepts
+// an optional pre-allocated token buffer to avoid allocation.
+func BuildCodeLengthTokensScratch(codeLengths []uint8, tokensBuf []HuffmanTreeToken) []HuffmanTreeToken {
 	n := len(codeLengths)
 	var tokens []HuffmanTreeToken
+	if cap(tokensBuf) > 0 {
+		tokens = tokensBuf[:0]
+	}
 
 	// prevValue is initialized to 8, matching the C reference
 	// (VP8LCreateCompressedHuffmanTree). This means the first code-length
@@ -542,6 +645,12 @@ func StoreHuffmanTreeToBitMask(bw *bitio.LosslessWriter, tokens []HuffmanTreeTok
 // which checks symbols[0] < kMaxSymbol && symbols[1] < kMaxSymbol
 // before using the simple path.
 func StoreHuffmanCode(bw *bitio.LosslessWriter, tree *HuffmanTreeCode) {
+	StoreHuffmanCodeScratch(bw, tree, nil)
+}
+
+// StoreHuffmanCodeScratch is like StoreHuffmanCode but accepts optional
+// scratch buffers to reduce allocations in storeFullHuffmanCode.
+func StoreHuffmanCodeScratch(bw *bitio.LosslessWriter, tree *HuffmanTreeCode, scratch *HuffmanScratch) {
 	const kMaxSymbol = 256 // simple encoding uses at most 8-bit symbols
 
 	// Collect unique symbols (those with non-zero code lengths).
@@ -575,7 +684,7 @@ func StoreHuffmanCode(bw *bitio.LosslessWriter, tree *HuffmanTreeCode) {
 		}
 	}
 
-	storeFullHuffmanCode(bw, tree)
+	storeFullHuffmanCodeScratch(bw, tree, scratch)
 }
 
 // storeSimpleHuffmanCode writes 1- or 2-symbol simple Huffman codes.
@@ -650,10 +759,19 @@ func clearHuffmanTreeIfOnlyOneSymbol(tree *HuffmanTreeCode) {
 // code-length tree approach. Matches the C reference StoreFullHuffmanCode
 // including the write_trimmed_length flag and trailing-zero trimming.
 func storeFullHuffmanCode(bw *bitio.LosslessWriter, tree *HuffmanTreeCode) {
+	storeFullHuffmanCodeScratch(bw, tree, nil)
+}
+
+func storeFullHuffmanCodeScratch(bw *bitio.LosslessWriter, tree *HuffmanTreeCode, scratch *HuffmanScratch) {
 	bw.WriteBits(0, 1) // is_simple = 0
 
 	// Build code-length tokens from the tree's code lengths.
-	tokens := BuildCodeLengthTokens(tree.CodeLengths)
+	var tokens []HuffmanTreeToken
+	if scratch != nil {
+		tokens = BuildCodeLengthTokensScratch(tree.CodeLengths, scratch.tokens)
+	} else {
+		tokens = BuildCodeLengthTokens(tree.CodeLengths)
+	}
 	numTokens := len(tokens)
 
 	// Build a histogram of the token codes (0..18).
@@ -663,7 +781,7 @@ func storeFullHuffmanCode(bw *bitio.LosslessWriter, tree *HuffmanTreeCode) {
 	}
 
 	// Create a Huffman tree for the code-length codes themselves.
-	codeLengthTree := CreateHuffmanTree(tokenHistogram[:], 7)
+	codeLengthTree := CreateHuffmanTreeScratch(tokenHistogram[:], 7, scratch)
 
 	// Write the code-length tree header (num_codes + 3-bit code lengths).
 	StoreHuffmanTreeOfHuffmanTreeToBitMask(bw, codeLengthTree.CodeLengths)
