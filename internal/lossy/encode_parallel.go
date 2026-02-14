@@ -832,6 +832,14 @@ func pickBestI4ModeRDParallel(w *RowWorker, srcBuf []byte, srcOff int, predBuf [
 	bestScore = ^uint64(0)
 	bestMode = BDCPred
 
+	// Pre-screen: compute prediction SSE for all eligible modes.
+	type modeCandidate struct {
+		mode int
+		sse  int
+	}
+	var candidates [NumBModes]modeCandidate
+	nCandidates := 0
+
 	for mode := 0; mode < NumBModes; mode++ {
 		if !hasTop && needsTop4(mode) {
 			continue
@@ -839,6 +847,32 @@ func pickBestI4ModeRDParallel(w *RowWorker, srcBuf []byte, srcOff int, predBuf [
 		if !hasLeft && needsLeft4(mode) {
 			continue
 		}
+		dsp.PredLuma4Direct(mode, predBuf, predOff)
+		sse := dsp.SSE4x4Direct(srcBuf[srcOff:], predBuf[predOff:])
+		candidates[nCandidates] = modeCandidate{mode, sse}
+		nCandidates++
+	}
+
+	// Select top K modes by prediction SSE.
+	K := maxI4RDModes
+	if nCandidates <= K {
+		K = nCandidates
+	}
+	for i := 0; i < K; i++ {
+		minIdx := i
+		for j := i + 1; j < nCandidates; j++ {
+			if candidates[j].sse < candidates[minIdx].sse {
+				minIdx = j
+			}
+		}
+		if minIdx != i {
+			candidates[i], candidates[minIdx] = candidates[minIdx], candidates[i]
+		}
+	}
+
+	// Full RD evaluation for top K modes only.
+	for i := 0; i < K; i++ {
+		mode := candidates[i].mode
 
 		dsp.PredLuma4Direct(mode, predBuf, predOff)
 		dsp.FTransformDirect(srcBuf[srcOff:], predBuf[predOff:], w.tmpCoeffs[:])
@@ -880,10 +914,23 @@ func pickBestI4ModeRDParallel(w *RowWorker, srcBuf []byte, srcOff int, predBuf [
 }
 
 // pickBestI4ModeRDTrellisParallel uses trellis quantization with worker buffers.
+// maxI4RDModes is the maximum number of I4 prediction modes to evaluate
+// with full RD. Modes are pre-screened by prediction SSE and only the
+// most promising ones get the expensive encode-decode cycle.
+const maxI4RDModes = 4
+
 func pickBestI4ModeRDTrellisParallel(w *RowWorker, srcBuf []byte, srcOff int, predBuf []byte, predOff int,
 	seg *SegmentInfo, topMode, leftMode uint8, hasTop, hasLeft bool, nzCtx int, proba *Proba) (bestMode uint8, bestScore uint64, bestRate int, bestDisto int) {
 	bestScore = ^uint64(0)
 	bestMode = BDCPred
+
+	// Pre-screen: compute prediction SSE for all eligible modes.
+	type modeCandidate struct {
+		mode int
+		sse  int
+	}
+	var candidates [NumBModes]modeCandidate
+	nCandidates := 0
 
 	for mode := 0; mode < NumBModes; mode++ {
 		if !hasTop && needsTop4(mode) {
@@ -892,6 +939,32 @@ func pickBestI4ModeRDTrellisParallel(w *RowWorker, srcBuf []byte, srcOff int, pr
 		if !hasLeft && needsLeft4(mode) {
 			continue
 		}
+		dsp.PredLuma4Direct(mode, predBuf, predOff)
+		sse := dsp.SSE4x4Direct(srcBuf[srcOff:], predBuf[predOff:])
+		candidates[nCandidates] = modeCandidate{mode, sse}
+		nCandidates++
+	}
+
+	// Select top K modes by prediction SSE (partial selection sort).
+	K := maxI4RDModes
+	if nCandidates <= K {
+		K = nCandidates
+	}
+	for i := 0; i < K; i++ {
+		minIdx := i
+		for j := i + 1; j < nCandidates; j++ {
+			if candidates[j].sse < candidates[minIdx].sse {
+				minIdx = j
+			}
+		}
+		if minIdx != i {
+			candidates[i], candidates[minIdx] = candidates[minIdx], candidates[i]
+		}
+	}
+
+	// Full RD evaluation for top K modes only.
+	for i := 0; i < K; i++ {
+		mode := candidates[i].mode
 
 		dsp.PredLuma4Direct(mode, predBuf, predOff)
 		dsp.FTransformDirect(srcBuf[srcOff:], predBuf[predOff:], w.tmpCoeffs[:])

@@ -1291,6 +1291,14 @@ func (enc *VP8Encoder) PickBestI4ModeRDTrellis(srcBuf []byte, srcOff int, predBu
 	bestScore = ^uint64(0)
 	bestMode = BDCPred
 
+	// Pre-screen: compute prediction SSE for all eligible modes.
+	type modeCandidate struct {
+		mode int
+		sse  int
+	}
+	var candidates [NumBModes]modeCandidate
+	nCandidates := 0
+
 	for mode := 0; mode < NumBModes; mode++ {
 		if !hasTop && needsTop4(mode) {
 			continue
@@ -1298,11 +1306,35 @@ func (enc *VP8Encoder) PickBestI4ModeRDTrellis(srcBuf []byte, srcOff int, predBu
 		if !hasLeft && needsLeft4(mode) {
 			continue
 		}
+		dsp.PredLuma4Direct(mode, predBuf, predOff)
+		sse := dsp.SSE4x4Direct(srcBuf[srcOff:], predBuf[predOff:])
+		candidates[nCandidates] = modeCandidate{mode, sse}
+		nCandidates++
+	}
+
+	// Select top K modes by prediction SSE (partial selection sort).
+	K := maxI4RDModes
+	if nCandidates <= K {
+		K = nCandidates
+	}
+	for i := 0; i < K; i++ {
+		minIdx := i
+		for j := i + 1; j < nCandidates; j++ {
+			if candidates[j].sse < candidates[minIdx].sse {
+				minIdx = j
+			}
+		}
+		if minIdx != i {
+			candidates[i], candidates[minIdx] = candidates[minIdx], candidates[i]
+		}
+	}
+
+	// Full RD evaluation for top K modes only.
+	for i := 0; i < K; i++ {
+		mode := candidates[i].mode
 
 		dsp.PredLuma4Direct(mode, predBuf, predOff)
-
 		dsp.FTransformDirect(srcBuf[srcOff:], predBuf[predOff:], enc.tmpCoeffs[:])
-		// Use trellis quantization (the final quantization for I4 blocks).
 		nz := TrellisQuantizeBlock(enc.tmpCoeffs[:], enc.tmpQCoeffs[:],
 			&seg.Y1, 0, 3, nzCtx, &enc.proba, seg.TLambdaI4)
 

@@ -59,6 +59,7 @@ type EncodeConfig struct {
 	Dithering  float32 // Dithering amplitude [0..1] for RGB->YUV conversion.
 	QMin       int  // 0-100, minimum quantizer value. Matches C libwebp's qmin.
 	QMax       int  // 0-100, maximum quantizer value. Matches C libwebp's qmax. -1 = use default (100).
+	HasAlpha   int  // -1 = unknown (will scan), 0 = no alpha, 1 = has alpha. Avoids redundant imageHasAlpha scans.
 }
 
 // DefaultConfig returns sensible encoding defaults (quality 75, method 4).
@@ -632,7 +633,16 @@ func (enc *VP8Encoder) importImage(img image.Image) {
 	padH := enc.mbH * 16
 
 	// Detect whether the image has meaningful alpha.
-	hasAlpha := imageHasAlpha(img)
+	// Use cached value from EncodeConfig if available.
+	var hasAlpha bool
+	switch enc.config.HasAlpha {
+	case 0:
+		hasAlpha = false
+	case 1:
+		hasAlpha = true
+	default:
+		hasAlpha = imageHasAlpha(img)
+	}
 
 	// Initialize dithering random generator if dithering is enabled.
 	var rg *dsp.VP8Random

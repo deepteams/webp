@@ -112,6 +112,9 @@ func TrellisQuantizeBlock(
 	lambdaI64 := int64(lambda)
 	bands := &proba.Bands[ctxType]
 
+	// VP8EntropyCost table reference for direct lookups (avoids VP8BitCost call overhead).
+	ecost := &dsp.VP8EntropyCost
+
 	for n := firstCoeff; n < 16; n++ {
 		zigIdx := int(KZigzag[n])
 		band := int(dsp.VP8EncBands[n+1])
@@ -166,6 +169,8 @@ func TrellisQuantizeBlock(
 		var deltaD0, deltaD1 int64
 		var nextCtx0, nextCtx1 int
 		var signedL0, signedL1 int16
+		// Pre-compute fixed level costs (context-independent) outside prevCtx loop.
+		var fixedL0, fixedL1 int
 		if hasL0 {
 			newErr := coeff0 - L0*quant
 			deltaD0 = weight * (int64(newErr*newErr) - coeff0sq)
@@ -174,6 +179,7 @@ func TrellisQuantizeBlock(
 				nextCtx0 = 2
 			}
 			signedL0 = int16(sign * L0)
+			fixedL0 = int(dsp.VP8LevelFixedCosts[L0])
 		}
 		if hasL1 {
 			L1 := L0 + 1
@@ -184,7 +190,12 @@ func TrellisQuantizeBlock(
 				nextCtx1 = 2
 			}
 			signedL1 = int16(sign * L1)
+			fixedL1 = int(dsp.VP8LevelFixedCosts[L1])
 		}
+
+		// Pre-compute distortion score contributions (independent of context).
+		distoL0 := int64(rdDistoMult) * deltaD0
+		distoL1 := int64(rdDistoMult) * deltaD1
 
 		for prevCtx := 0; prevCtx < 3; prevCtx++ {
 			if !prev[prevCtx].valid {
@@ -193,28 +204,35 @@ func TrellisQuantizeBlock(
 			prevScore := prev[prevCtx].score
 			p := &bandProbas[prevCtx]
 
-			// Inlined level=0 rate: not-EOB + zero.
-			rate0 := dsp.VP8BitCost(1, p[0]) + dsp.VP8BitCost(0, p[1])
+			// Factor out common VP8BitCost(1, p[0]) = VP8EntropyCost[255-p[0]].
+			notEob := int(ecost[255-p[0]])
+
+			// level=0 rate: not-EOB + zero.
+			rate0 := notEob + int(ecost[p[1]])
 			totalScore := prevScore + int64(rate0)*lambdaI64
 			if !curr[0].valid || totalScore < curr[0].score {
 				curr[0] = state{score: totalScore, level: 0, prevCtx: prevCtx, valid: true}
 			}
 
-			if hasL0 {
-				// Inlined level=L0 rate: not-EOB + non-zero + level tree.
-				rateL0 := dsp.VP8BitCost(1, p[0]) + dsp.VP8BitCost(1, p[1]) + levelCost(L0, p)
-				ts := prevScore + int64(rateL0)*lambdaI64 + int64(rdDistoMult)*deltaD0
-				if !curr[nextCtx0].valid || ts < curr[nextCtx0].score {
-					curr[nextCtx0] = state{score: ts, level: signedL0, prevCtx: prevCtx, valid: true}
-				}
-			}
+			if hasL0 || hasL1 {
+				// Non-zero base: not-EOB + non-zero.
+				nonZero := notEob + int(ecost[255-p[1]])
 
-			if hasL1 {
-				L1 := L0 + 1
-				rateL1 := dsp.VP8BitCost(1, p[0]) + dsp.VP8BitCost(1, p[1]) + levelCost(L1, p)
-				ts := prevScore + int64(rateL1)*lambdaI64 + int64(rdDistoMult)*deltaD1
-				if !curr[nextCtx1].valid || ts < curr[nextCtx1].score {
-					curr[nextCtx1] = state{score: ts, level: signedL1, prevCtx: prevCtx, valid: true}
+				if hasL0 {
+					// Level cost = fixed part + variable part (inlined for common levels).
+					rateL0 := nonZero + fixedL0 + fastVariableLevelCost(L0, p, ecost)
+					ts := prevScore + int64(rateL0)*lambdaI64 + distoL0
+					if !curr[nextCtx0].valid || ts < curr[nextCtx0].score {
+						curr[nextCtx0] = state{score: ts, level: signedL0, prevCtx: prevCtx, valid: true}
+					}
+				}
+
+				if hasL1 {
+					rateL1 := nonZero + fixedL1 + fastVariableLevelCost(L0+1, p, ecost)
+					ts := prevScore + int64(rateL1)*lambdaI64 + distoL1
+					if !curr[nextCtx1].valid || ts < curr[nextCtx1].score {
+						curr[nextCtx1] = state{score: ts, level: signedL1, prevCtx: prevCtx, valid: true}
+					}
 				}
 			}
 		}
@@ -236,7 +254,7 @@ func TrellisQuantizeBlock(
 			}
 			eobScore := curr[c].score
 			if n < 15 {
-				eobRate := dsp.VP8BitCost(0, bands[band].Probas[c][0])
+				eobRate := int(ecost[bands[band].Probas[c][0]])
 				eobScore += int64(eobRate) * lambdaI64
 			}
 			if eobScore < bestTerminal {
@@ -272,6 +290,27 @@ func TrellisQuantizeBlock(
 	}
 
 	return last
+}
+
+// fastVariableLevelCost computes the probability-dependent part of the level cost
+// with specialized fast paths for common levels (1-4), avoiding the general loop.
+func fastVariableLevelCost(level int, probas *[NumProbas]uint8, ecost *[256]uint16) int {
+	switch level {
+	case 1:
+		// pattern=0x001, bits=0x000 → p[2] bit=0
+		return int(ecost[probas[2]])
+	case 2:
+		// pattern=0x007, bits=0x001 → p[2] bit=1, p[3] bit=0, p[4] bit=0
+		return int(ecost[255-probas[2]]) + int(ecost[probas[3]]) + int(ecost[probas[4]])
+	case 3:
+		// pattern=0x00f, bits=0x005 → p[2] bit=1, p[3] bit=0, p[4] bit=1, p[5] bit=0
+		return int(ecost[255-probas[2]]) + int(ecost[probas[3]]) + int(ecost[255-probas[4]]) + int(ecost[probas[5]])
+	case 4:
+		// pattern=0x00f, bits=0x00d → p[2] bit=1, p[3] bit=0, p[4] bit=1, p[5] bit=1
+		return int(ecost[255-probas[2]]) + int(ecost[probas[3]]) + int(ecost[255-probas[4]]) + int(ecost[255-probas[5]])
+	default:
+		return variableLevelCost(level, probas)
+	}
 }
 
 // computeTrellisLevelRate computes the rate cost for a coefficient level.

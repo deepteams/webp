@@ -159,16 +159,13 @@ func computeOneLevelCost(probas *[NumProbas]uint8, costs *LevelCost) {
 // where the DC coefficient is handled separately via WHT).
 func TokenCostForCoeffs(coeffs []int16, nz int, ctxType int, proba *Proba, ctx0 int, first int) int {
 	_ = coeffs[15] // BCE hint
-	cost := 0
+	ecost := &dsp.VP8EntropyCost
 	if nz == 0 {
-		// All zeros: cost of coding EOB at first position.
 		p := proba.BandsPtr[ctxType][first]
-		cost += dsp.VP8BitCost(0, p.Probas[ctx0][0])
-		return cost
+		return int(ecost[p.Probas[ctx0][0]])
 	}
 
 	// Find last non-zero coefficient in zigzag scan order.
-	// Our coeffs are in raster order; we convert via KZigzag.
 	last := -1
 	for n := 15; n >= first; n-- {
 		if coeffs[KZigzag[n]] != 0 {
@@ -177,37 +174,35 @@ func TokenCostForCoeffs(coeffs []int16, nz int, ctxType int, proba *Proba, ctx0 
 		}
 	}
 	if last < 0 {
-		// All zeros despite nz > 0 — handle gracefully.
 		p := proba.BandsPtr[ctxType][first]
-		cost += dsp.VP8BitCost(0, p.Probas[ctx0][0])
-		return cost
+		return int(ecost[p.Probas[ctx0][0]])
 	}
 
+	cost := 0
 	ctx := ctx0
 	for n := first; n < 16; n++ {
 		band := dsp.VP8EncBands[n]
-		p := &proba.Bands[ctxType][band]
+		pp := &proba.Bands[ctxType][band].Probas[ctx]
 
 		v := int(coeffs[KZigzag[n]])
 		if v < 0 {
 			v = -v
 		}
 
-		// Check if this is past the last non-zero in zigzag order.
 		if n > last {
-			cost += dsp.VP8BitCost(0, p.Probas[ctx][0]) // EOB
+			cost += int(ecost[pp[0]]) // EOB
 			break
 		}
 
 		// Not EOB.
-		cost += dsp.VP8BitCost(1, p.Probas[ctx][0])
+		cost += int(ecost[255-pp[0]])
 
 		if v == 0 {
-			cost += dsp.VP8BitCost(0, p.Probas[ctx][1]) // zero
+			cost += int(ecost[pp[1]]) // zero
 			ctx = 0
 		} else {
-			cost += dsp.VP8BitCost(1, p.Probas[ctx][1]) // non-zero
-			cost += levelCost(v, &p.Probas[ctx])         // includes sign bit + level tree
+			cost += int(ecost[255-pp[1]]) // non-zero
+			cost += int(dsp.VP8LevelFixedCosts[v]) + variableLevelCost(v, pp)
 			if v == 1 {
 				ctx = 1
 			} else {

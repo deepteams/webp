@@ -409,8 +409,10 @@ func Encode(w io.Writer, img image.Image, opts *EncoderOptions) error {
 // plane as an ALPH chunk payload using VP8L lossless compression.
 // Returns (vp8Bitstream, alphChunkData, fourcc, error).
 func encodeLossyWithAlpha(img image.Image, opts *EncoderOptions) ([]byte, []byte, uint32, error) {
+	// Cache alpha detection result to avoid redundant full-image scans.
+	hasAlpha := imageHasAlpha(img)
 	if !opts.Exact {
-		img = cleanupTransparentAreaLossy(img)
+		img = cleanupTransparentAreaLossyWith(img, hasAlpha)
 	}
 	cfg := lossy.DefaultConfig(int(opts.Quality))
 	cfg.Method = opts.Method
@@ -455,6 +457,13 @@ func encodeLossyWithAlpha(img image.Image, opts *EncoderOptions) ([]byte, []byte
 		cfg.Dithering = 1.0 + (0.5-1.0)*x2*x2
 	}
 
+	// Pass cached alpha detection to avoid redundant scan in importImage.
+	if hasAlpha {
+		cfg.HasAlpha = 1
+	} else {
+		cfg.HasAlpha = 0
+	}
+
 	var enc *lossy.VP8Encoder
 	if opts.UseSharpYUV {
 		yuv, err := sharpYUVConvert(img)
@@ -474,7 +483,7 @@ func encodeLossyWithAlpha(img image.Image, opts *EncoderOptions) ([]byte, []byte
 	}
 
 	// Check if the source image has any non-opaque alpha.
-	alpha := extractAlpha(img)
+	alpha := extractAlphaWith(img, hasAlpha)
 	if alpha == nil {
 		// Fully opaque: simple VP8 with no alpha.
 		return bs, nil, container.FourCCVP8, nil
@@ -604,7 +613,11 @@ func encodeLossless(img image.Image, opts *EncoderOptions) ([]byte, uint32, erro
 // The function returns the (possibly modified) image; if the source has no
 // alpha channel the image is returned unchanged.
 func cleanupTransparentAreaLossy(img image.Image) image.Image {
-	if !imageHasAlpha(img) {
+	return cleanupTransparentAreaLossyWith(img, imageHasAlpha(img))
+}
+
+func cleanupTransparentAreaLossyWith(img image.Image, hasAlpha bool) image.Image {
+	if !hasAlpha {
 		return img
 	}
 
@@ -996,7 +1009,11 @@ func sharpYUVConvert(img image.Image) (*image.YCbCr, error) {
 // extractAlpha extracts the alpha plane from the image as a width*height byte
 // slice. Returns nil if all pixels are fully opaque (alpha == 255).
 func extractAlpha(img image.Image) []byte {
-	if !imageHasAlpha(img) {
+	return extractAlphaWith(img, imageHasAlpha(img))
+}
+
+func extractAlphaWith(img image.Image, hasAlpha bool) []byte {
+	if !hasAlpha {
 		return nil
 	}
 	b := img.Bounds()
