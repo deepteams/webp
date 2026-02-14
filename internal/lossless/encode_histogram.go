@@ -431,6 +431,7 @@ func (h *Histogram) computeHistogramCost() {
 type HistoSet struct {
 	histos    []*Histogram
 	cacheBits int
+	curCombo  *Histogram // scratch for entropy bin combining
 }
 
 // allocateHistoSet creates a set pre-populated with initialized histograms.
@@ -776,7 +777,10 @@ func histogramCombineEntropyBin(imageHisto *HistoSet, numBins int,
 		bins[i].first = -1
 	}
 
-	curCombo := NewHistogram(imageHisto.cacheBits)
+	if imageHisto.curCombo == nil {
+		imageHisto.curCombo = NewHistogram(imageHisto.cacheBits)
+	}
+	curCombo := imageHisto.curCombo
 	histograms := imageHisto.histos
 
 	idx := 0

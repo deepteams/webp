@@ -114,6 +114,14 @@ type Encoder struct {
 	traceRefs      *BackwardRefs    // reusable backward refs (trace result)
 	traceDistArray []uint16         // reusable dist array for TraceBackwards
 	huffScratch    *HuffmanScratch  // reusable Huffman tree scratch buffers
+	brScratch      BackwardRefsScratch // reusable backward refs scratch
+
+	// Minor reusable buffers.
+	sortedPalette  []uint32
+	deltaPalette   []uint32
+	histoImageBuf  []uint32
+	subImageHisto  *Histogram
+	huffCodes      [][HuffmanCodesPerMetaCode]*HuffmanTreeCode
 }
 
 // Errors.
@@ -338,7 +346,12 @@ func (enc *Encoder) applyTransforms() {
 // the predictor transform on the palette-indexed data (kPaletteAndSpatial).
 func (enc *Encoder) applyPaletteTransform() {
 	// Sort palette for better compression.
-	sortedPalette := make([]uint32, enc.paletteSize)
+	if cap(enc.sortedPalette) >= enc.paletteSize {
+		enc.sortedPalette = enc.sortedPalette[:enc.paletteSize]
+	} else {
+		enc.sortedPalette = make([]uint32, enc.paletteSize)
+	}
+	sortedPalette := enc.sortedPalette
 	copy(sortedPalette, enc.palette[:enc.paletteSize])
 	sort.Slice(sortedPalette, func(i, j int) bool {
 		return sortedPalette[i] < sortedPalette[j]
@@ -423,6 +436,12 @@ func (enc *Encoder) encodeStream() ([]byte, error) {
 	// No more transforms.
 	bw.WriteBits(0, 1)
 
+	// Reset tree slab allocator for this encoding pass.
+	if enc.huffScratch == nil {
+		enc.huffScratch = &HuffmanScratch{}
+	}
+	enc.huffScratch.ResetTreePool()
+
 	// Build hash chain (reuse if capacity is sufficient).
 	pixelCount := currentWidth * height
 	hc := enc.hashChain
@@ -455,24 +474,24 @@ func (enc *Encoder) encodeStream() ([]byte, error) {
 	if len(enc.traceDistArray) < pixelCount {
 		enc.traceDistArray = make([]uint16, pixelCount)
 	}
-	brScratch := &BackwardRefsScratch{
-		Candidate: enc.candidateRefs,
-		Trace:     enc.traceRefs,
-		DistArray: enc.traceDistArray,
-	}
+	enc.brScratch.Candidate = enc.candidateRefs
+	enc.brScratch.Trace = enc.traceRefs
+	enc.brScratch.DistArray = enc.traceDistArray
 	cacheBits := GetBackwardReferencesWithScratch(currentWidth, height, enc.argb,
-		quality, lz77Types, enc.cacheBits, hc, refs, brScratch)
+		quality, lz77Types, enc.cacheBits, hc, refs, &enc.brScratch)
 
 	// Build histograms and get symbols.
 	symbols, histoSet := GetHistoImageSymbols(
 		currentWidth, height, refs, quality, enc.histogramBits, cacheBits)
 
 	// Build Huffman codes for each histogram.
-	if enc.huffScratch == nil {
-		enc.huffScratch = &HuffmanScratch{}
-	}
 	numHistos := histoSet.Size()
-	huffCodes := make([][HuffmanCodesPerMetaCode]*HuffmanTreeCode, numHistos)
+	if cap(enc.huffCodes) >= numHistos {
+		enc.huffCodes = enc.huffCodes[:numHistos]
+	} else {
+		enc.huffCodes = make([][HuffmanCodesPerMetaCode]*HuffmanTreeCode, numHistos)
+	}
+	huffCodes := enc.huffCodes
 	for i := 0; i < numHistos; i++ {
 		h := histoSet.Get(i)
 		huffCodes[i][0] = CreateHuffmanTreeScratch(h.Literal, MaxAllowedCodeLength, enc.huffScratch)
@@ -498,7 +517,15 @@ func (enc *Encoder) encodeStream() ([]byte, error) {
 		txSize := VP8LSubSampleSize(currentWidth, histoBits)
 		tySize := VP8LSubSampleSize(height, histoBits)
 		histoImageSize := txSize * tySize
-		histoImage := make([]uint32, histoImageSize)
+		if cap(enc.histoImageBuf) >= histoImageSize {
+			enc.histoImageBuf = enc.histoImageBuf[:histoImageSize]
+			for i := range enc.histoImageBuf {
+				enc.histoImageBuf[i] = 0
+			}
+		} else {
+			enc.histoImageBuf = make([]uint32, histoImageSize)
+		}
+		histoImage := enc.histoImageBuf
 		for i, s := range symbols {
 			if i < histoImageSize {
 				histoImage[i] = uint32(s) << 8
@@ -602,14 +629,14 @@ func (enc *Encoder) encodeSubImage(bw *bitio.LosslessWriter, data []uint32, widt
 	lz77Types := kLZ77Standard | kLZ77RLE
 	GetBackwardReferences(width, height, data, quality, lz77Types, cacheBits, hc, refs)
 
-	// Build a single histogram from the backward references.
-	h := NewHistogram(0)
-	h.AddRefs(refs, width, 0)
-
-	// Build Huffman codes from the histogram.
-	if enc.huffScratch == nil {
-		enc.huffScratch = &HuffmanScratch{}
+	// Build a single histogram from the backward references (reuse scratch).
+	if enc.subImageHisto == nil || len(enc.subImageHisto.Literal) < histogramNumCodes(0) {
+		enc.subImageHisto = NewHistogram(0)
+	} else {
+		enc.subImageHisto.Clear()
 	}
+	h := enc.subImageHisto
+	h.AddRefs(refs, width, 0)
 	codes := [HuffmanCodesPerMetaCode]*HuffmanTreeCode{
 		CreateHuffmanTreeScratch(h.Literal, MaxAllowedCodeLength, enc.huffScratch),
 		CreateHuffmanTreeScratch(h.Red[:], MaxAllowedCodeLength, enc.huffScratch),
@@ -700,7 +727,12 @@ func (enc *Encoder) storeSubImageData(
 // encodePalette writes the palette colors to the bitstream.
 func (enc *Encoder) encodePalette(bw *bitio.LosslessWriter, palette []uint32) {
 	// Delta-encode palette: first pixel is literal, rest are deltas.
-	deltaPalette := make([]uint32, len(palette))
+	if cap(enc.deltaPalette) >= len(palette) {
+		enc.deltaPalette = enc.deltaPalette[:len(palette)]
+	} else {
+		enc.deltaPalette = make([]uint32, len(palette))
+	}
+	deltaPalette := enc.deltaPalette
 	deltaPalette[0] = palette[0]
 	for i := 1; i < len(palette); i++ {
 		deltaPalette[i] = subPixelsEnc(palette[i], palette[i-1])

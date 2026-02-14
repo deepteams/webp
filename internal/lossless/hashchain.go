@@ -71,15 +71,17 @@ func findMatchLength(array1, array2 []uint32, bestLenMatch, maxLimit int) int {
 type HashChain struct {
 	// OffsetLength stores packed (offset, length) for each position.
 	// Format: offset = value >> maxLengthBits, length = value & maxLength.
-	OffsetLength []uint32
-	size         int
+	OffsetLength     []uint32
+	size             int
+	hashToFirstIndex []int32 // reusable between Fill() calls
 }
 
 // NewHashChain creates a hash chain for an image of the given pixel count.
 func NewHashChain(size int) *HashChain {
 	return &HashChain{
-		OffsetLength: make([]uint32, size),
-		size:         size,
+		OffsetLength:     make([]uint32, size),
+		size:             size,
+		hashToFirstIndex: make([]int32, hashSize),
 	}
 }
 
@@ -142,8 +144,8 @@ func (hc *HashChain) Fill(argb []uint32, quality int, xsize, ysize int, lowEffor
 	iterMax := getMaxItersForQuality(quality) // 9.4
 	winSize := uint32(GetWindowSizeForHashChain(quality, xsize))
 
-	// hashToFirstIndex maps hash -> first position with that hash.
-	hashToFirstIndex := make([]int32, hashSize)
+	// Reuse hashToFirstIndex from the HashChain struct.
+	hashToFirstIndex := hc.hashToFirstIndex
 	for i := range hashToFirstIndex {
 		hashToFirstIndex[i] = -1
 	}

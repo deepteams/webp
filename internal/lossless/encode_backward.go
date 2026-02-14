@@ -190,12 +190,20 @@ const windowOffsetsMaxSize = 32
 // within a restricted window defined by the lowest 32 PlaneCode values.
 // This produces matches with small distance codes.
 func BackwardReferencesLz77Box(xsize, ysize int, argb []uint32, cacheBits int,
-	hashChainBest *HashChain, refs *BackwardRefs) {
+	hashChainBest *HashChain, refs *BackwardRefs, scratch *BackwardRefsScratch) {
 
 	pixCount := xsize * ysize
 
 	// counts[i] counts how many times a pixel is repeated starting at position i.
-	countsIni := make([]uint16, pixCount)
+	var countsIni []uint16
+	if scratch != nil && cap(scratch.CountsIni) >= pixCount {
+		countsIni = scratch.CountsIni[:pixCount]
+	} else {
+		countsIni = make([]uint16, pixCount)
+		if scratch != nil {
+			scratch.CountsIni = countsIni
+		}
+	}
 	countsIni[pixCount-1] = 1
 	for i := pixCount - 2; i >= 0; i-- {
 		if argb[i] == argb[i+1] {
@@ -249,8 +257,19 @@ func BackwardReferencesLz77Box(xsize, ysize int, argb []uint32, cacheBits int,
 		}
 	}
 
-	// Build box-mode hash chain.
-	boxHC := NewHashChain(pixCount)
+	// Build box-mode hash chain (reuse from scratch if possible).
+	var boxHC *HashChain
+	if scratch != nil && scratch.BoxHC != nil && scratch.BoxHC.size >= pixCount {
+		boxHC = scratch.BoxHC
+		for i := 0; i < pixCount; i++ {
+			boxHC.OffsetLength[i] = 0
+		}
+	} else {
+		boxHC = NewHashChain(pixCount)
+		if scratch != nil {
+			scratch.BoxHC = boxHC
+		}
+	}
 	boxHC.OffsetLength[0] = 0
 	bestOffsetPrev := -1
 	bestLengthPrev := -1
@@ -591,6 +610,8 @@ type BackwardRefsScratch struct {
 	Trace     *BackwardRefs // trace result refs
 	DistArray []uint16      // dist array for TraceBackwards
 	Histo     *Histogram    // scratch histogram for cost estimation
+	CountsIni []uint16      // reusable for Lz77Box
+	BoxHC     *HashChain    // reusable hash chain for Lz77Box
 }
 
 func GetBackwardReferences(
@@ -661,7 +682,7 @@ func GetBackwardReferencesWithScratch(
 	}
 
 	if lz77Types&kLZ77Box != 0 {
-		BackwardReferencesLz77Box(width, height, argb, 0, hc, candidate)
+		BackwardReferencesLz77Box(width, height, argb, 0, hc, candidate, scratch)
 		cost := histogramEstimateBitsFromRefsScratch(candidate, 0, histoScratch)
 		if cost < bestCost {
 			bestCost = cost
@@ -773,11 +794,12 @@ func copyRefs(dst, src *BackwardRefs) {
 // (256..279), and color cache indices (280+). This layout matches the C
 // reference's CostModel where literal is a unified histogram.
 type costModelTrace struct {
-	alpha    [NumLiteralCodes]float64
-	red      [NumLiteralCodes]float64
-	blue     [NumLiteralCodes]float64
-	distance [NumDistanceCodes]float64
-	literal  []float64 // size = NumLiteralCodes + NumLengthCodes + cacheSize
+	alpha         [NumLiteralCodes]float64
+	red           [NumLiteralCodes]float64
+	blue          [NumLiteralCodes]float64
+	distance      [NumDistanceCodes]float64
+	literal       []float64 // size = NumLiteralCodes + NumLengthCodes + cacheSize
+	literalCounts []uint32  // reusable scratch for build()
 }
 
 // newCostModelTrace allocates a TraceBackwards cost model.
@@ -831,7 +853,15 @@ func (cm *costModelTrace) build(xsize, cacheBits int, refs *BackwardRefs) {
 	if cacheBits > 0 {
 		literalSize += 1 << cacheBits
 	}
-	literalCounts := make([]uint32, literalSize)
+	if cap(cm.literalCounts) >= literalSize {
+		cm.literalCounts = cm.literalCounts[:literalSize]
+		for i := range cm.literalCounts {
+			cm.literalCounts[i] = 0
+		}
+	} else {
+		cm.literalCounts = make([]uint32, literalSize)
+	}
+	literalCounts := cm.literalCounts
 	var redCounts [NumLiteralCodes]uint32
 	var blueCounts [NumLiteralCodes]uint32
 	var alphaCounts [NumLiteralCodes]uint32

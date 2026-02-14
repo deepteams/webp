@@ -111,13 +111,79 @@ func (h *nodeHeap) heapInit() {
 // ---------------------------------------------------------------------------
 
 // HuffmanScratch holds reusable scratch buffers for Huffman tree building.
-// Note: codeLengths/codes are NOT shared because they persist in the returned
-// HuffmanTreeCode. Only truly temporary buffers are shared.
 type HuffmanScratch struct {
 	goodForRle []bool
 	tokens     []HuffmanTreeToken
 	treePool   []huffmanTreeNode // reusable node pool for buildTreeAndExtractLengths
 	treeIdx    []int             // reusable indices for nodeHeap
+
+	// Tree slab allocator: eliminates per-tree struct+slice allocs.
+	trees []HuffmanTreeCode
+	clBuf []uint8
+	cBuf  []uint16
+	tNext int
+	clOff int
+	cOff  int
+
+	// Reusable nodeHeap avoids &nodeHeap{} heap escape.
+	heap nodeHeap
+}
+
+// ResetTreePool resets the slab allocator for a new encoding pass.
+func (s *HuffmanScratch) ResetTreePool() {
+	s.tNext = 0
+	s.clOff = 0
+	s.cOff = 0
+}
+
+// AllocTree returns a zeroed *HuffmanTreeCode with backing slices for
+// numSymbols, using slab allocation when possible.
+func (s *HuffmanScratch) AllocTree(numSymbols int) *HuffmanTreeCode {
+	clEnd := s.clOff + numSymbols
+	cEnd := s.cOff + numSymbols
+
+	// Ensure slab capacity.
+	if s.tNext >= len(s.trees) {
+		newCap := len(s.trees) * 2
+		if newCap < 128 {
+			newCap = 128
+		}
+		s.trees = make([]HuffmanTreeCode, newCap)
+		s.tNext = 0
+	}
+	if clEnd > len(s.clBuf) {
+		newCap := numSymbols * 128
+		if newCap < 8192 {
+			newCap = 8192
+		}
+		s.clBuf = make([]uint8, newCap)
+		s.clOff = 0
+		clEnd = numSymbols
+	}
+	if cEnd > len(s.cBuf) {
+		newCap := numSymbols * 128
+		if newCap < 8192 {
+			newCap = 8192
+		}
+		s.cBuf = make([]uint16, newCap)
+		s.cOff = 0
+		cEnd = numSymbols
+	}
+
+	t := &s.trees[s.tNext]
+	t.NumSymbols = numSymbols
+	t.CodeLengths = s.clBuf[s.clOff:clEnd:clEnd]
+	t.Codes = s.cBuf[s.cOff:cEnd:cEnd]
+	for i := range t.CodeLengths {
+		t.CodeLengths[i] = 0
+	}
+	for i := range t.Codes {
+		t.Codes[i] = 0
+	}
+	s.tNext++
+	s.clOff = clEnd
+	s.cOff = cEnd
+	return t
 }
 
 // CreateHuffmanTree builds a HuffmanTreeCode from the given histogram
@@ -131,37 +197,44 @@ func CreateHuffmanTree(histogram []uint32, codeLengthLimit int) *HuffmanTreeCode
 // scratch buffers to reduce allocations.
 func CreateHuffmanTreeScratch(histogram []uint32, codeLengthLimit int, scratch *HuffmanScratch) *HuffmanTreeCode {
 	numSymbols := len(histogram)
-	tree := &HuffmanTreeCode{
-		NumSymbols:  numSymbols,
-		CodeLengths: make([]uint8, numSymbols),
-		Codes:       make([]uint16, numSymbols),
-	}
-
-	// Count non-zero symbols.
-	type symCount struct {
-		symbol int
-		count  uint32
-	}
-	var nonZero []symCount
-	for i, c := range histogram {
-		if c > 0 {
-			nonZero = append(nonZero, symCount{i, c})
+	var tree *HuffmanTreeCode
+	if scratch != nil {
+		tree = scratch.AllocTree(numSymbols)
+	} else {
+		tree = &HuffmanTreeCode{
+			NumSymbols:  numSymbols,
+			CodeLengths: make([]uint8, numSymbols),
+			Codes:       make([]uint16, numSymbols),
 		}
 	}
 
-	switch len(nonZero) {
-	case 0:
-		// Empty histogram: all code lengths stay zero.
+	// Count non-zero symbols (only need first two for simple cases).
+	var first0, first1 int
+	numNonZero := 0
+	for i, c := range histogram {
+		if c > 0 {
+			if numNonZero == 0 {
+				first0 = i
+			} else if numNonZero == 1 {
+				first1 = i
+			}
+			numNonZero++
+			if numNonZero > 2 {
+				break
+			}
+		}
+	}
+
+	switch {
+	case numNonZero == 0:
 		return tree
-	case 1:
-		// Single symbol: assign code length 1.
-		tree.CodeLengths[nonZero[0].symbol] = 1
+	case numNonZero == 1:
+		tree.CodeLengths[first0] = 1
 		generateCanonicalCodes(tree)
 		return tree
-	case 2:
-		// Two symbols: each gets code length 1.
-		tree.CodeLengths[nonZero[0].symbol] = 1
-		tree.CodeLengths[nonZero[1].symbol] = 1
+	case numNonZero == 2:
+		tree.CodeLengths[first0] = 1
+		tree.CodeLengths[first1] = 1
 		generateCanonicalCodes(tree)
 		return tree
 	}
@@ -217,7 +290,14 @@ func buildTreeAndExtractLengths(histogram []uint32, numSymbols, limit int, codeL
 			}
 		}
 
-		h := &nodeHeap{pool: pool, indices: indices}
+		var h *nodeHeap
+		if scratch != nil {
+			h = &scratch.heap
+		} else {
+			h = &nodeHeap{}
+		}
+		h.pool = pool
+		h.indices = indices
 		for sym := 0; sym < numSymbols; sym++ {
 			if histogram[sym] != 0 {
 				count := histogram[sym]
@@ -653,33 +733,29 @@ func StoreHuffmanCode(bw *bitio.LosslessWriter, tree *HuffmanTreeCode) {
 func StoreHuffmanCodeScratch(bw *bitio.LosslessWriter, tree *HuffmanTreeCode, scratch *HuffmanScratch) {
 	const kMaxSymbol = 256 // simple encoding uses at most 8-bit symbols
 
-	// Collect unique symbols (those with non-zero code lengths).
-	var uniqueSymbols []int
+	// Count unique symbols and track the first two (avoids slice alloc).
+	var sym0, sym1 int
+	numUnique := 0
 	for i := 0; i < tree.NumSymbols; i++ {
 		if tree.CodeLengths[i] > 0 {
-			uniqueSymbols = append(uniqueSymbols, i)
+			if numUnique == 0 {
+				sym0 = i
+			} else if numUnique == 1 {
+				sym1 = i
+			}
+			numUnique++
 		}
 	}
 
-	numUnique := len(uniqueSymbols)
-
 	if numUnique == 0 {
-		// Empty tree: emit minimal simple code (matches C reference).
-		storeSimpleHuffmanCode(bw, tree, uniqueSymbols)
+		storeSimpleHuffmanCode(bw, 0, 0, 0)
 		return
 	}
 
-	// Simple encoding is only valid when all symbols fit in 8 bits.
 	if numUnique <= 2 {
-		allFit := true
-		for _, s := range uniqueSymbols {
-			if s >= kMaxSymbol {
-				allFit = false
-				break
-			}
-		}
+		allFit := sym0 < kMaxSymbol && (numUnique < 2 || sym1 < kMaxSymbol)
 		if allFit {
-			storeSimpleHuffmanCode(bw, tree, uniqueSymbols)
+			storeSimpleHuffmanCode(bw, numUnique, sym0, sym1)
 			return
 		}
 	}
@@ -688,10 +764,9 @@ func StoreHuffmanCodeScratch(bw *bitio.LosslessWriter, tree *HuffmanTreeCode, sc
 }
 
 // storeSimpleHuffmanCode writes 1- or 2-symbol simple Huffman codes.
-func storeSimpleHuffmanCode(bw *bitio.LosslessWriter, tree *HuffmanTreeCode, symbols []int) {
+func storeSimpleHuffmanCode(bw *bitio.LosslessWriter, numSymbols, sym0, sym1 int) {
 	bw.WriteBits(1, 1) // is_simple = 1
 
-	numSymbols := len(symbols)
 	if numSymbols == 0 {
 		// Edge case: empty tree. Write as 1 symbol with value 0.
 		bw.WriteBits(0, 1) // num_symbols - 1 = 0
@@ -702,13 +777,12 @@ func storeSimpleHuffmanCode(bw *bitio.LosslessWriter, tree *HuffmanTreeCode, sym
 
 	if numSymbols == 1 {
 		bw.WriteBits(0, 1) // num_symbols - 1 = 0
-		sym := symbols[0]
-		if sym < 2 {
+		if sym0 < 2 {
 			bw.WriteBits(0, 1) // first_symbol_len_code = 0 -> 1 bit symbol
-			bw.WriteBits(uint32(sym), 1)
+			bw.WriteBits(uint32(sym0), 1)
 		} else {
 			bw.WriteBits(1, 1) // first_symbol_len_code = 1 -> 8 bit symbol
-			bw.WriteBits(uint32(sym), 8)
+			bw.WriteBits(uint32(sym0), 8)
 		}
 		return
 	}
@@ -717,7 +791,6 @@ func storeSimpleHuffmanCode(bw *bitio.LosslessWriter, tree *HuffmanTreeCode, sym
 	bw.WriteBits(1, 1) // num_symbols - 1 = 1
 
 	// Sort symbols so the smaller one comes first.
-	sym0, sym1 := symbols[0], symbols[1]
 	if sym0 > sym1 {
 		sym0, sym1 = sym1, sym0
 	}
