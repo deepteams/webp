@@ -20,13 +20,13 @@ TEXT ·fTransformWHTSSE2(SB), NOSPLIT, $0-48
 	PUNPCKLWL X1, X4       // X4 = [r0c0,r1c0, r0c1,r1c1, r0c2,r1c2, r0c3,r1c3]
 	MOVO X2, X5
 	PUNPCKLWL X3, X5       // X5 = [r2c0,r3c0, r2c1,r3c1, r2c2,r3c2, r2c3,r3c3]
-	// Step 2: interleave dwords
+	// Step 2: combine 64-bit halves (MOVLHPS/MOVHLPS for qword granularity)
 	MOVO X4, X6
-	PUNPCKLLQ X5, X4       // X4 = low64 pairs for cols 0,1
-	PUNPCKHLQ X5, X6       // X6 = high64 pairs for cols 2,3
+	MOVLHPS X5, X4         // X4 = [X4_low64, X5_low64]
+	MOVHLPS X6, X5         // X5 = [X6_high64, X5_high64]
 	// Step 3: group columns via dword shuffle
 	PSHUFD $0xD8, X4, X0   // X0 = [col0 | col1]
-	PSHUFD $0xD8, X6, X2   // X2 = [col2 | col3]
+	PSHUFD $0xD8, X5, X2   // X2 = [col2 | col3]
 
 	// === Pass 1: row-wise butterfly (on transposed columns) ===
 	// a0=col0+col2, a1=col1+col3, a3=col0-col2, a2=col1-col3
@@ -49,10 +49,10 @@ TEXT ·fTransformWHTSSE2(SB), NOSPLIT, $0-48
 	MOVO X3, X6
 	PUNPCKLWL X2, X6       // X6 = interleave(tcol2, tcol3)
 	MOVO X5, X7
-	PUNPCKLLQ X6, X5
-	PUNPCKHLQ X6, X7
+	MOVLHPS X6, X5         // X5 = [X5_low64, X6_low64]
+	MOVHLPS X7, X6         // X6 = [X7_high64, X6_high64]
 	PSHUFD $0xD8, X5, X0   // X0 = [row0 | row1]
-	PSHUFD $0xD8, X7, X2   // X2 = [row2 | row3]
+	PSHUFD $0xD8, X6, X2   // X2 = [row2 | row3]
 
 	// === Pass 2: column-wise butterfly ===
 	// a0=row0+row2, a1=row1+row3, a3=row0-row2, a2=row1-row3
@@ -117,10 +117,10 @@ TEXT ·transformWHTSSE2(SB), NOSPLIT, $0-48
 	MOVO X2, X6
 	PUNPCKLWL X3, X6       // interleave(trow2, trow3)
 	MOVO X5, X7
-	PUNPCKLLQ X6, X5
-	PUNPCKHLQ X6, X7
+	MOVLHPS X6, X5         // X5 = [X5_low64, X6_low64]
+	MOVHLPS X7, X6         // X6 = [X7_high64, X6_high64]
 	PSHUFD $0xD8, X5, X0   // X0 = [tcol0 | tcol1]
-	PSHUFD $0xD8, X7, X2   // X2 = [tcol2 | tcol3]
+	PSHUFD $0xD8, X6, X2   // X2 = [tcol2 | tcol3]
 
 	// === Add bias +3 to tcol0 (low 64 bits of X0) ===
 	MOVQ $0x0003000300030003, AX
@@ -154,10 +154,10 @@ TEXT ·transformWHTSSE2(SB), NOSPLIT, $0-48
 	MOVO X2, X6
 	PUNPCKLWL X3, X6       // interleave(fcol2, fcol3)
 	MOVO X5, X7
-	PUNPCKLLQ X6, X5
-	PUNPCKHLQ X6, X7
+	MOVLHPS X6, X5         // X5 = [X5_low64, X6_low64]
+	MOVHLPS X7, X6         // X6 = [X7_high64, X6_high64]
 	PSHUFD $0xD8, X5, X0   // X0 = [frow0 | frow1]
-	PSHUFD $0xD8, X7, X2   // X2 = [frow2 | frow3]
+	PSHUFD $0xD8, X6, X2   // X2 = [frow2 | frow3]
 
 	// === Scatter store: each row's 4 values at stride 16 (32 bytes) ===
 	// Row 0: byte offsets 0, 32, 64, 96
