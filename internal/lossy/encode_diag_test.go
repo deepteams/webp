@@ -128,7 +128,7 @@ func TestEncodeDiag(t *testing.T) {
 				t.Errorf("filter level %d exceeds maximum %d for Q%d", filterLevel, maxLevel, q)
 			}
 
-			decW, decH, decY, decYStride, decU, decV, decUVStride, err := DecodeFrame(vp8Data)
+			_, decW, decH, decY, decYStride, decU, decV, decUVStride, err := DecodeFrame(vp8Data)
 			if err != nil {
 				t.Fatalf("DecodeFrame failed: %v", err)
 			}

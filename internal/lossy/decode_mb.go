@@ -160,7 +160,12 @@ func (dec *Decoder) parseResiduals(mb, leftMB *MB, block *MBData, tokenBR *bitio
 
 	if !block.IsI4x4 {
 		// Parse DC (i16-DC = type 1).
-		var dc [16]int16
+		// Use decoder-level scratch to avoid heap escape through dsp.TransformWHT
+		// (function variable — compiler can't prove the slice doesn't escape).
+		dc := &dec.dcScratch
+		for i := range dc {
+			dc[i] = 0
+		}
 		ctx := int(mb.NzDC) + int(leftMB.NzDC)
 		nz := getCoeffs(tokenBR, bands[1], ctx, q.Y2Mat, 0, dc[:])
 		if nz > 0 {

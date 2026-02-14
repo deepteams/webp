@@ -109,7 +109,7 @@ func computeYUVPSNR(t *testing.T, img *image.NRGBA, quality int) (yPSNR, uPSNR, 
 	}
 
 	// Decode.
-	decW, decH, decY, decYStride, decU, decV, decUVStride, err := DecodeFrame(vp8Data)
+	_, decW, decH, decY, decYStride, decU, decV, decUVStride, err := DecodeFrame(vp8Data)
 	if err != nil {
 		t.Fatalf("DecodeFrame q%d: %v", quality, err)
 	}
@@ -211,7 +211,7 @@ func TestPerColorPSNR(t *testing.T) {
 				t.Fatalf("EncodeFrame: %v", err)
 			}
 
-			_, _, decY, decYStride, decU, decV, decUVStride, err := DecodeFrame(vp8Data)
+			_, _, _, decY, decYStride, decU, decV, decUVStride, err := DecodeFrame(vp8Data)
 			if err != nil {
 				t.Fatalf("DecodeFrame: %v", err)
 			}

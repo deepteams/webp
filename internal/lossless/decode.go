@@ -3,9 +3,49 @@ package lossless
 import (
 	"errors"
 	"image"
+	"sync"
 
 	"github.com/deepteams/webp/internal/bitio"
 )
+
+// losslessDecoderPool caches Decoder structs between decode calls so that the
+// large pixels buffer and Huffman scratch can be reused.
+var losslessDecoderPool sync.Pool
+
+// acquireDecoder returns a Decoder from the pool (or allocates a new one).
+// Mutable state is zeroed; reusable buffers (pixels, huffScratch, codeLengthsBuf)
+// are kept for reuse.
+func acquireDecoder() *Decoder {
+	if v := losslessDecoderPool.Get(); v != nil {
+		dec := v.(*Decoder)
+		dec.br = nil
+		dec.Width = 0
+		dec.Height = 0
+		dec.HasAlpha = false
+		dec.transformWidth = 0
+		dec.nextTransform = 0
+		dec.transformsSeen = 0
+		dec.hdr = metadata{}
+		// Keep: pixels, codeLengthsBuf, huffScratch (for reuse)
+		return dec
+	}
+	return &Decoder{}
+}
+
+// releaseDecoder returns a Decoder to the pool for reuse.
+func releaseDecoder(dec *Decoder) {
+	if dec == nil {
+		return
+	}
+	// Nil external references to avoid holding onto input data.
+	dec.br = nil
+	dec.argbCache = nil
+	dec.hdr.htreeGroups = nil
+	dec.hdr.huffmanImage = nil
+	dec.hdr.colorCache = nil
+	// Keep pixels, transformBuf, and huffScratch for reuse.
+	losslessDecoderPool.Put(dec)
+}
 
 // VP8L decoder errors.
 var (
@@ -33,6 +73,8 @@ type Decoder struct {
 	pixels []uint32
 	// Scratch cache for applying inverse transforms.
 	argbCache []uint32
+	// Reusable buffer for applyInverseTransforms output (pooled).
+	transformBuf []uint32
 
 	// Huffman metadata for the current image level.
 	hdr metadata
@@ -62,7 +104,9 @@ type metadata struct {
 // DecodeVP8L decodes a VP8L bitstream (the payload after the VP8L fourcc and
 // chunk size) and returns an NRGBA image.
 func DecodeVP8L(data []byte) (*image.NRGBA, error) {
-	dec := &Decoder{}
+	dec := acquireDecoder()
+	defer releaseDecoder(dec)
+
 	if err := dec.decodeHeader(data); err != nil {
 		return nil, err
 	}
@@ -99,8 +143,22 @@ func DecodeVP8L(data []byte) (*image.NRGBA, error) {
 	if numPixTrans > numAlloc {
 		numAlloc = numPixTrans
 	}
-	dec.pixels = make([]uint32, numAlloc+dec.Width+dec.Width*numArgbCacheRows)
+
+	// Reuse pixels buffer if large enough.
+	needed := numAlloc + dec.Width + dec.Width*numArgbCacheRows
+	if cap(dec.pixels) >= needed {
+		dec.pixels = dec.pixels[:needed]
+	} else {
+		dec.pixels = make([]uint32, needed)
+	}
 	dec.argbCache = dec.pixels[numAlloc+dec.Width:]
+
+	// Reuse transform output buffer if large enough.
+	if cap(dec.transformBuf) >= numAlloc {
+		dec.transformBuf = dec.transformBuf[:numAlloc]
+	} else {
+		dec.transformBuf = make([]uint32, numAlloc)
+	}
 
 	// Decode the entropy-coded image data using the transform width.
 	if err := dec.decodeImageData(dec.pixels[:numPixTrans], tw, dec.Height, dec.Height); err != nil {
@@ -239,18 +297,18 @@ const numArgbCacheRows = 16
 // green 15..8, blue 7..0).
 func argbToNRGBA(pixels []uint32, width, height int) *image.NRGBA {
 	img := image.NewNRGBA(image.Rect(0, 0, width, height))
+	pix := img.Pix
+	stride := img.Stride
 	for y := 0; y < height; y++ {
-		for x := 0; x < width; x++ {
-			argb := pixels[y*width+x]
-			a := uint8(argb >> 24)
-			r := uint8(argb >> 16)
-			g := uint8(argb >> 8)
-			b := uint8(argb)
-			off := img.PixOffset(x, y)
-			img.Pix[off+0] = r
-			img.Pix[off+1] = g
-			img.Pix[off+2] = b
-			img.Pix[off+3] = a
+		row := pixels[y*width : y*width+width]
+		dst := pix[y*stride : y*stride+width*4]
+		for x, argb := range row {
+			off := x * 4
+			_ = dst[off+3] // BCE hint
+			dst[off+0] = uint8(argb >> 16)
+			dst[off+1] = uint8(argb >> 8)
+			dst[off+2] = uint8(argb)
+			dst[off+3] = uint8(argb >> 24)
 		}
 	}
 	return img

@@ -81,7 +81,7 @@ func TestEncodeCompare(t *testing.T) {
 					}
 
 					// Decode Go output with Go decoder.
-					_, _, goDecY, goYStride, goDecU, goDecV, goUVStride, err := DecodeFrame(vp8Data)
+					_, _, _, goDecY, goYStride, goDecU, goDecV, goUVStride, err := DecodeFrame(vp8Data)
 					if err != nil {
 						t.Fatalf("Go DecodeFrame: %v", err)
 					}
@@ -221,7 +221,7 @@ func TestEncodeCompareRGB(t *testing.T) {
 					if err != nil {
 						t.Fatalf("Go EncodeFrame: %v", err)
 					}
-					_, _, decY, yStride, decU, decV, uvStride, err := DecodeFrame(vp8Data)
+					_, _, _, decY, yStride, decU, decV, uvStride, err := DecodeFrame(vp8Data)
 					if err != nil {
 						t.Fatalf("Go DecodeFrame: %v", err)
 					}

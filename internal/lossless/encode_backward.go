@@ -644,7 +644,7 @@ type BackwardRefsScratch struct {
 	Histo     *Histogram    // scratch histogram for cost estimation
 	CountsIni []uint16      // reusable for Lz77Box
 	BoxHC     *HashChain    // reusable hash chain for Lz77Box
-	CostsBuf  []float64     // reusable costs buffer for costManager
+	CostsBuf  []float32     // reusable costs buffer for costManager
 
 	// Reusable slabs for CalculateBestCacheSize.
 	CacheSizeHistoSlab []Histogram
@@ -688,7 +688,7 @@ func GetBackwardReferencesWithScratch(
 		histoScratch = scratch.Histo
 	}
 	if candidate == nil {
-		candidate = NewBackwardRefs(pixCount)
+		candidate = NewBackwardRefs(pixCount / 2)
 	} else {
 		candidate.Reset()
 	}
@@ -751,7 +751,7 @@ func GetBackwardReferencesWithScratch(
 			distArray = scratch.DistArray
 		}
 		if traceResult == nil {
-			traceResult = NewBackwardRefs(pixCount)
+			traceResult = NewBackwardRefs(pixCount / 2)
 		} else {
 			traceResult.Reset()
 		}
@@ -986,7 +986,7 @@ func (cm *costModelTrace) getDistanceCost(distance int) float64 {
 // costInterval represents a range [start, end) of pixel indices where a
 // particular (cost, position) pair may provide the minimum cost.
 type costInterval struct {
-	cost     float64
+	cost     float32
 	start    int
 	end      int
 	index    int // the pixel position that generated this interval
@@ -997,7 +997,7 @@ type costInterval struct {
 // costCacheInterval caches the GetLengthCost values grouped by equal-cost
 // ranges, reducing the number of interval insertions.
 type costCacheInterval struct {
-	cost  float64
+	cost  float32
 	start int
 	end   int // exclusive
 }
@@ -1016,8 +1016,8 @@ type costManager struct {
 	cacheIntervals     []costCacheInterval
 	cacheIntervalsSize int
 
-	costCache [maxLength]float64 // costCache[k] = getLengthCost(k)
-	costs     []float64
+	costCache [maxLength]float32 // costCache[k] = getLengthCost(k)
+	costs     []float32
 	distArray []uint16
 
 	// Free list for interval reuse. In Go we use a simple pool slice
@@ -1027,7 +1027,7 @@ type costManager struct {
 
 // newCostManager initializes a CostManager. If costsBuf is non-nil and has
 // sufficient capacity, it is reused to avoid a large allocation.
-func newCostManager(distArray []uint16, pixCount int, cm *costModelTrace, costsBuf []float64) *costManager {
+func newCostManager(distArray []uint16, pixCount int, cm *costModelTrace, costsBuf []float32) *costManager {
 	mgr := &costManager{
 		distArray: distArray,
 	}
@@ -1039,7 +1039,7 @@ func newCostManager(distArray []uint16, pixCount int, cm *costModelTrace, costsB
 
 	// Fill cost_cache.
 	for i := 0; i < costCacheSize; i++ {
-		mgr.costCache[i] = cm.getLengthCost(i)
+		mgr.costCache[i] = float32(cm.getLengthCost(i))
 	}
 
 	// Count the number of distinct cost intervals.
@@ -1070,10 +1070,10 @@ func newCostManager(distArray []uint16, pixCount int, cm *costModelTrace, costsB
 	if cap(costsBuf) >= pixCount {
 		mgr.costs = costsBuf[:pixCount]
 	} else {
-		mgr.costs = make([]float64, pixCount)
+		mgr.costs = make([]float32, pixCount)
 	}
 	for i := range mgr.costs {
-		mgr.costs[i] = math.MaxFloat64
+		mgr.costs[i] = math.MaxFloat32
 	}
 
 	return mgr
@@ -1119,7 +1119,7 @@ func (mgr *costManager) popInterval(iv *costInterval) {
 
 // updateCost updates the cost at pixel i if (cost + costCache[i-position])
 // is cheaper than the current cost.
-func (mgr *costManager) updateCost(i, position int, cost float64) {
+func (mgr *costManager) updateCost(i, position int, cost float32) {
 	k := i - position
 	if mgr.costs[i] > cost {
 		mgr.costs[i] = cost
@@ -1128,7 +1128,7 @@ func (mgr *costManager) updateCost(i, position int, cost float64) {
 }
 
 // updateCostPerInterval updates costs for all pixels in [start, end).
-func (mgr *costManager) updateCostPerInterval(start, end, position int, cost float64) {
+func (mgr *costManager) updateCostPerInterval(start, end, position int, cost float32) {
 	for i := start; i < end; i++ {
 		mgr.updateCost(i, position, cost)
 	}
@@ -1175,7 +1175,7 @@ func (mgr *costManager) positionOrphanInterval(current, previous *costInterval) 
 
 // insertInterval adds a new interval [start, end) into the sorted list.
 // If the manager is at capacity, the interval is serialized directly.
-func (mgr *costManager) insertInterval(intervalIn *costInterval, cost float64, position, start, end int) {
+func (mgr *costManager) insertInterval(intervalIn *costInterval, cost float32, position, start, end int) {
 	if start >= end {
 		return
 	}
@@ -1194,7 +1194,7 @@ func (mgr *costManager) insertInterval(intervalIn *costInterval, cost float64, p
 
 // pushInterval processes a new interval defined by (distanceCost, position, length).
 // It merges with, splits, or replaces existing intervals as needed.
-func (mgr *costManager) pushInterval(distanceCost float64, position, length int) {
+func (mgr *costManager) pushInterval(distanceCost float32, position, length int) {
 	interval := mgr.head
 
 	// For short intervals, serialize directly.
@@ -1274,8 +1274,8 @@ func (mgr *costManager) pushInterval(distanceCost float64, position, length int)
 // as a literal or cache hit, updating costs/distArray if cheaper.
 func addSingleLiteralWithCostModel(
 	argb []uint32, cc *ColorCache, cm *costModelTrace,
-	idx int, useColorCache bool, prevCost float64,
-	costs []float64, distArray []uint16,
+	idx int, useColorCache bool, prevCost float32,
+	costs []float32, distArray []uint16,
 ) {
 	costVal := prevCost
 	color := argb[idx]
@@ -1289,13 +1289,13 @@ func addSingleLiteralWithCostModel(
 
 	if ix >= 0 {
 		// Color cache hit: scale by 68/100 matching C's DivRound heuristic.
-		costVal += cm.getCacheCost(ix) * 0.68
+		costVal += float32(cm.getCacheCost(ix) * 0.68)
 	} else {
 		if useColorCache {
 			cc.Insert(color)
 		}
 		// Literal: scale by 82/100 matching C's DivRound heuristic.
-		costVal += cm.getLiteralCost(color) * 0.82
+		costVal += float32(cm.getLiteralCost(color) * 0.82)
 	}
 
 	if costs[idx] > costVal {
@@ -1319,7 +1319,7 @@ func backwardReferencesHashChainDistanceOnly(
 	cm := newCostModelTrace(cacheBits)
 	cm.build(xsize, cacheBits, refs)
 
-	var costsBuf []float64
+	var costsBuf []float32
 	if scratch != nil {
 		costsBuf = scratch.CostsBuf
 	}
@@ -1340,7 +1340,7 @@ func backwardReferencesHashChainDistanceOnly(
 
 	offsetPrev := -1
 	lenPrev := -1
-	var offsetCost float64
+	var offsetCost float32
 	firstOffsetIsConstant := -1
 	reach := 0
 
@@ -1357,7 +1357,7 @@ func backwardReferencesHashChainDistanceOnly(
 		if length >= 2 {
 			if offset != offsetPrev {
 				code := DistanceToPlaneCode(xsize, offset)
-				offsetCost = cm.getDistanceCost(code)
+				offsetCost = float32(cm.getDistanceCost(code))
 				firstOffsetIsConstant = 1
 				mgr.pushInterval(prevCost+offsetCost, i, length)
 			} else {

@@ -117,7 +117,7 @@ func bytesToARGBSlice(b []uint8, s []uint32) {
 func (dec *Decoder) applyInverseTransforms(pixels []uint32) []uint32 {
 	numPix := len(pixels)
 	rows := pixels
-	out := dec.argbCache
+	out := dec.transformBuf
 	if out == nil || len(out) < numPix {
 		out = make([]uint32, numPix)
 	}

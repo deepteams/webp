@@ -50,11 +50,26 @@ type Features struct {
 	FrameCount   int    // number of frames (1 for still images)
 }
 
+// readAll reads all data from r. If r implements Len() int (e.g.
+// *bytes.Reader), a single exact-sized allocation is used instead of
+// the repeated doublings that io.ReadAll performs.
+func readAll(r io.Reader) ([]byte, error) {
+	if lr, ok := r.(interface{ Len() int }); ok {
+		n := lr.Len()
+		if n > 0 {
+			data := make([]byte, n)
+			_, err := io.ReadFull(r, data)
+			return data, err
+		}
+	}
+	return io.ReadAll(r)
+}
+
 // Decode reads a WebP image from r and returns it as an image.Image.
 // For lossless images the returned type is *image.NRGBA.
 // For lossy images the returned type is *image.YCbCr (when available) or *image.NRGBA.
 func Decode(r io.Reader) (image.Image, error) {
-	data, err := io.ReadAll(r)
+	data, err := readAll(r)
 	if err != nil {
 		return nil, fmt.Errorf("webp: reading data: %w", err)
 	}
@@ -64,7 +79,7 @@ func Decode(r io.Reader) (image.Image, error) {
 // DecodeConfig returns the color model and dimensions of a WebP image
 // without decoding the entire image.
 func DecodeConfig(r io.Reader) (image.Config, error) {
-	data, err := io.ReadAll(r)
+	data, err := readAll(r)
 	if err != nil {
 		return image.Config{}, fmt.Errorf("webp: reading data: %w", err)
 	}
@@ -89,7 +104,7 @@ func DecodeConfig(r io.Reader) (image.Config, error) {
 
 // GetFeatures reads WebP features without decoding pixel data.
 func GetFeatures(r io.Reader) (*Features, error) {
-	data, err := io.ReadAll(r)
+	data, err := readAll(r)
 	if err != nil {
 		return nil, fmt.Errorf("webp: reading data: %w", err)
 	}
@@ -224,10 +239,11 @@ func decodeFrameForAnimation(bitstreamData, alphaData []byte) (*image.NRGBA, err
 // from the libwebp reference, processing luma rows in overlapping pairs to
 // interpolate between adjacent chroma rows.
 func decodeLossy(data []byte, alphaData []byte) (image.Image, error) {
-	width, height, yPlane, yStride, uPlane, vPlane, uvStride, err := lossy.DecodeFrame(data)
+	dec, width, height, yPlane, yStride, uPlane, vPlane, uvStride, err := lossy.DecodeFrame(data)
 	if err != nil {
 		return nil, fmt.Errorf("webp: lossy decode: %w", err)
 	}
+	defer lossy.ReleaseDecoder(dec)
 
 	// Decode alpha plane if present.
 	var alphaPlane []byte

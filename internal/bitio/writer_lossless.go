@@ -35,6 +35,29 @@ func NewLosslessWriter(expectedSize int) *LosslessWriter {
 	}
 }
 
+// NewLosslessWriterWithBuf creates a LosslessWriter reusing the provided
+// buffer if it has sufficient capacity; otherwise a new buffer is allocated.
+func NewLosslessWriterWithBuf(buf []byte, expectedSize int) *LosslessWriter {
+	if expectedSize < 1024 {
+		expectedSize = 1024
+	}
+	expectedSize = ((expectedSize >> 10) + 1) << 10
+	if cap(buf) >= expectedSize {
+		return &LosslessWriter{
+			buf: buf[:cap(buf)],
+		}
+	}
+	return &LosslessWriter{
+		buf: make([]byte, expectedSize),
+	}
+}
+
+// Buf returns the full backing buffer (not just the written portion).
+// Use this to capture the buffer for reuse across encode calls.
+func (bw *LosslessWriter) Buf() []byte {
+	return bw.buf
+}
+
 // WriteBits writes nBits (0..64) from the lower bits of v into the
 // bitstream in little-endian order.
 func (bw *LosslessWriter) WriteBits(v uint32, nBits int) {

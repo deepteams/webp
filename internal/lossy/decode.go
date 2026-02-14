@@ -3,10 +3,59 @@ package lossy
 import (
 	"encoding/binary"
 	"fmt"
+	"sync"
 
 	"github.com/deepteams/webp/internal/bitio"
 	"github.com/deepteams/webp/internal/dsp"
 )
+
+// lossyDecoderPool caches Decoder structs between decode calls so that the
+// large backing slab (intraT + yuvB + cacheY/U/V) can be reused.
+var lossyDecoderPool sync.Pool
+
+// acquireDecoder returns a Decoder from the pool (or allocates a new one).
+// Mutable header/state fields are zeroed; reusable buffers (yuvT, mbInfo,
+// fInfo, mbData, slab via cacheY) are kept for reuse-or-grow in initFrame.
+func acquireDecoder() *Decoder {
+	if v := lossyDecoderPool.Get(); v != nil {
+		dec := v.(*Decoder)
+		// Zero mutable state — keep slice backing arrays for reuse.
+		dec.frmHdr = FrameHeader{}
+		dec.picHdr = PictureHeader{}
+		dec.filterHdr = FilterHeader{}
+		dec.segHdr = SegmentHeader{}
+		dec.mbW = 0
+		dec.mbH = 0
+		dec.mbX = 0
+		dec.mbY = 0
+		dec.br = nil
+		for i := range dec.parts {
+			dec.parts[i] = nil
+		}
+		dec.numPartsMinusOne = 0
+		dec.useSkipProba = false
+		dec.skipP = 0
+		dec.filterType = 0
+		dec.AlphaData = nil
+		return dec
+	}
+	return &Decoder{}
+}
+
+// ReleaseDecoder returns a Decoder to the pool for reuse.
+// The caller must not reference any slices from the decoder after this call.
+func ReleaseDecoder(dec *Decoder) {
+	if dec == nil {
+		return
+	}
+	// Nil external references to avoid holding onto large input data.
+	dec.br = nil
+	for i := range dec.parts {
+		dec.parts[i] = nil
+	}
+	dec.AlphaData = nil
+	lossyDecoderPool.Put(dec)
+}
 
 // BoolSource abstracts the VP8 boolean decoder interface needed by the parser.
 type BoolSource interface {
@@ -142,16 +191,27 @@ type Decoder struct {
 	cacheUVStride          int
 	cacheYOff, cacheUOff, cacheVOff int // offsets into cache for extra filter rows
 
+	// slab is the single backing allocation for intraT+yuvB+cacheY/U/V,
+	// kept across pool reuses so initFrame can reuse-or-grow.
+	slab []byte
+
 	// Alpha.
 	AlphaData []byte // compressed alpha data (set externally)
+
+	// Scratch space reused across macroblock decodes to avoid heap escapes.
+	dcScratch [16]int16
 }
 
 // DecodeFrame decodes a complete VP8 lossy frame from data.
-// It returns width, height and the decoded YUV planes (Y, U, V) plus their strides.
-func DecodeFrame(data []byte) (width, height int, y []byte, yStride int, u, v []byte, uvStride int, err error) {
-	dec := &Decoder{}
+// It returns the Decoder (for pool reuse), width, height and the decoded YUV
+// planes (Y, U, V) plus their strides. The caller must call
+// ReleaseDecoder(dec) after consuming the YUV planes.
+func DecodeFrame(data []byte) (dec *Decoder, width, height int, y []byte, yStride int, u, v []byte, uvStride int, err error) {
+	dec = acquireDecoder()
 
 	if err = dec.parseHeaders(data); err != nil {
+		ReleaseDecoder(dec)
+		dec = nil
 		return
 	}
 
@@ -159,12 +219,16 @@ func DecodeFrame(data []byte) (width, height int, y []byte, yStride int, u, v []
 	height = dec.picHdr.Height
 
 	if err = dec.initFrame(); err != nil {
+		ReleaseDecoder(dec)
+		dec = nil
 		return
 	}
 
 	dec.precomputeFilterStrengths()
 
 	if err = dec.parseFrame(); err != nil {
+		ReleaseDecoder(dec)
+		dec = nil
 		return
 	}
 
@@ -373,14 +437,35 @@ func (dec *Decoder) parsePartitions(buf []byte) error {
 	return nil
 }
 
-// initFrame allocates all working memory for the decoder.
+// initFrame allocates (or reuses) all working memory for the decoder.
 func (dec *Decoder) initFrame() error {
 	mbW := dec.mbW
 
-	dec.yuvT = make([]TopSamples, mbW)
-	dec.mbInfo = make([]MB, mbW+1) // index 0 is the left sentinel
-	dec.fInfo = make([]FInfo, mbW)
-	dec.mbData = make([]MBData, mbW)
+	// Reuse-or-grow typed slices.
+	if cap(dec.yuvT) >= mbW {
+		dec.yuvT = dec.yuvT[:mbW]
+		clear(dec.yuvT)
+	} else {
+		dec.yuvT = make([]TopSamples, mbW)
+	}
+	if cap(dec.mbInfo) >= mbW+1 {
+		dec.mbInfo = dec.mbInfo[:mbW+1]
+		clear(dec.mbInfo)
+	} else {
+		dec.mbInfo = make([]MB, mbW+1)
+	}
+	if cap(dec.fInfo) >= mbW {
+		dec.fInfo = dec.fInfo[:mbW]
+		clear(dec.fInfo)
+	} else {
+		dec.fInfo = make([]FInfo, mbW)
+	}
+	if cap(dec.mbData) >= mbW {
+		dec.mbData = dec.mbData[:mbW]
+		clear(dec.mbData)
+	} else {
+		dec.mbData = make([]MBData, mbW)
+	}
 
 	// Output cache: single row of macroblocks.
 	dec.cacheYStride = 16 * mbW
@@ -395,7 +480,15 @@ func (dec *Decoder) initFrame() error {
 	cacheUSize := totalRows * 8 * dec.cacheUVStride
 	cacheVSize := cacheUSize
 	slabSize := intraTSize + yuvBSize + cacheYSize + cacheUSize + cacheVSize
-	slab := make([]byte, slabSize)
+
+	// Reuse-or-grow the byte slab.
+	if cap(dec.slab) >= slabSize {
+		dec.slab = dec.slab[:slabSize]
+		clear(dec.slab)
+	} else {
+		dec.slab = make([]byte, slabSize)
+	}
+	slab := dec.slab
 
 	off := 0
 	dec.intraT = slab[off : off+intraTSize]

@@ -64,7 +64,7 @@ func TestDebugUVPipeline(t *testing.T) {
 	}
 
 	// Our decoder.
-	w, h, yP, _, uP, vP, _, err := DecodeFrame(bs)
+	_, w, h, yP, _, uP, vP, _, err := DecodeFrame(bs)
 	if err != nil {
 		t.Fatalf("decode failed: %v", err)
 	}

@@ -128,6 +128,9 @@ type Encoder struct {
 
 	// Reusable residuals buffer for ResidualImage.
 	residualsBuf []uint32
+
+	// Reusable output buffer for LosslessWriter.
+	writerBuf []byte
 }
 
 // Errors.
@@ -417,8 +420,8 @@ func (enc *Encoder) encodeStream() ([]byte, error) {
 	currentWidth := enc.currentWidth
 
 	// Estimated output size.
-	estimatedSize := width*height*4/2 + 1024
-	bw := bitio.NewLosslessWriter(estimatedSize)
+	estimatedSize := width*height + 1024
+	bw := bitio.NewLosslessWriterWithBuf(enc.writerBuf, estimatedSize)
 
 	// Write VP8L header.
 	// Signature byte.
@@ -465,7 +468,7 @@ func (enc *Encoder) encodeStream() ([]byte, error) {
 
 	// Get backward references (reuse buffers if available).
 	if enc.bestRefs == nil {
-		enc.bestRefs = NewBackwardRefs(pixelCount)
+		enc.bestRefs = NewBackwardRefs(pixelCount / 2)
 	} else {
 		enc.bestRefs.Reset()
 	}
@@ -474,10 +477,10 @@ func (enc *Encoder) encodeStream() ([]byte, error) {
 
 	// Prepare scratch buffers for GetBackwardReferences.
 	if enc.candidateRefs == nil {
-		enc.candidateRefs = NewBackwardRefs(pixelCount)
+		enc.candidateRefs = NewBackwardRefs(pixelCount / 2)
 	}
 	if enc.traceRefs == nil {
-		enc.traceRefs = NewBackwardRefs(pixelCount)
+		enc.traceRefs = NewBackwardRefs(pixelCount / 2)
 	}
 	if len(enc.traceDistArray) < pixelCount {
 		enc.traceDistArray = make([]uint16, pixelCount)
@@ -487,6 +490,10 @@ func (enc *Encoder) encodeStream() ([]byte, error) {
 	enc.brScratch.DistArray = enc.traceDistArray
 	cacheBits := GetBackwardReferencesWithScratch(currentWidth, height, enc.argb,
 		quality, lz77Types, enc.cacheBits, hc, refs, &enc.brScratch)
+
+	// Release large hash chain buffers; sub-images will allocate right-sized.
+	enc.hashChain = nil
+	enc.brScratch.BoxHC = nil
 
 	// Build histograms and get symbols.
 	symbols, histoSet := GetHistoImageSymbols(
@@ -577,7 +584,9 @@ func (enc *Encoder) encodeStream() ([]byte, error) {
 	// Write image data using backward refs + Huffman codes.
 	enc.storeImageData(bw, refs, symbols, huffCodes, currentWidth, histoBits, cacheBits)
 
-	return bw.Finish(), nil
+	result := bw.Finish()
+	enc.writerBuf = bw.Buf()
+	return result, nil
 }
 
 // writeTransformData writes transform-specific data to the bitstream.
@@ -629,7 +638,7 @@ func (enc *Encoder) encodeSubImage(bw *bitio.LosslessWriter, data []uint32, widt
 	// Generate backward references using LZ77 standard + RLE strategies.
 	// cache_bits = 0 (no color cache for sub-images), matching C reference.
 	if enc.candidateRefs == nil {
-		enc.candidateRefs = NewBackwardRefs(pixelCount)
+		enc.candidateRefs = NewBackwardRefs(pixelCount / 2)
 	} else {
 		enc.candidateRefs.Reset()
 	}
