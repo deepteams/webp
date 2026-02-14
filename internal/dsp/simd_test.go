@@ -419,3 +419,45 @@ func BenchmarkTM16Dispatch(b *testing.B) {
 		PredLuma16[1](buf, off)
 	}
 }
+
+func BenchmarkTM8uvGo(b *testing.B) {
+	rng := rand.New(rand.NewSource(103))
+	buf, off := makePredBuf8(rng)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		tm8uv(buf, off)
+	}
+}
+
+func BenchmarkTM8uvDispatch(b *testing.B) {
+	rng := rand.New(rand.NewSource(103))
+	buf, off := makePredBuf8(rng)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		PredChroma8[1](buf, off)
+	}
+}
+
+func BenchmarkTransformWHTGo(b *testing.B) {
+	in := make([]int16, 16)
+	out := make([]int16, 256)
+	for i := range in {
+		in[i] = int16(i*17 - 100)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		transformWHT(in, out)
+	}
+}
+
+func BenchmarkTransformWHTDispatch(b *testing.B) {
+	in := make([]int16, 16)
+	out := make([]int16, 256)
+	for i := range in {
+		in[i] = int16(i*17 - 100)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		TransformWHT(in, out)
+	}
+}

@@ -155,45 +155,51 @@ dc16_store:
 	RET
 
 // func tm16asmNEON(dst []byte, off int)
-// TrueMotion 16x16: dst[i,j] = clip(left[j] + top[i] - tl). Scalar implementation.
+// TrueMotion 16x16: dst[i,j] = clip(left[j] + top[i] - tl).
+// NEON vectorized: widen to uint16, add, saturating narrow.
+// ~10 instructions per row vs ~68 scalar.
 TEXT ·tm16asmNEON(SB), NOSPLIT, $0-32
 	MOVD dst_base+0(FP), R0
 	MOVD off+24(FP), R1
 	ADD R1, R0                  // R0 = &dst[off]
 
-	// Load top-left
+	// Load top-left pixel
 	SUB $(BPS+1), R0, R2
 	MOVBU (R2), R3              // tl
 
-	// Load 16 top pixels into R-regs
+	// Load 16 top pixels
 	SUB $BPS, R0, R2            // &top
+	VLD1 (R2), [V0.B16]        // V0 = 16 top pixels (uint8)
+
+	// Widen top pixels: uint8 → uint16 (two 8-element vectors)
+	WORD $0x2F08A401            // UXTL  V1.8H, V0.8B   (low 8 pixels)
+	WORD $0x6F08A402            // UXTL2 V2.8H, V0.16B  (high 8 pixels)
+
+	// Broadcast tl as uint16, compute diff = top - tl
+	VDUP R3, V3.H8              // V3 = [tl, tl, ...] × 8 as uint16
+	VSUB V3.H8, V1.H8, V4.H8   // V4 = top_lo - tl (int16)
+	VSUB V3.H8, V2.H8, V5.H8   // V5 = top_hi - tl (int16)
 
 	MOVD $16, R5                // row counter
-tm16_row:
-	// Get left pixel for this row
+tm16_neon_row:
 	SUB $1, R0, R6
-	MOVBU (R6), R7              // left
-	SUB R3, R7, R8              // base = left - tl
+	MOVBU (R6), R7              // left pixel for this row
 
-	// Process 16 pixels per row
-	MOVD $0, R9                 // col counter
-tm16_col:
-	MOVBU (R2)(R9), R10         // top[i]
-	ADD R8, R10                 // base + top[i]
-	// Clip to [0, 255]
-	CMP $0, R10
-	CSEL LT, ZR, R10, R10      // if < 0, set to 0
-	CMP $255, R10
-	MOVD $255, R11
-	CSEL GT, R11, R10, R10     // if > 255, set to 255
-	MOVB R10, (R0)(R9)
-	ADD $1, R9
-	CMP $16, R9
-	BLT tm16_col
+	// Broadcast left as uint16, compute result = left + diff
+	VDUP R7, V6.H8              // V6 = [left, ...] × 8 as uint16
+	VADD V4.H8, V6.H8, V1.H8   // V1 = left + (top_lo - tl)
+	VADD V5.H8, V6.H8, V2.H8   // V2 = left + (top_hi - tl)
+
+	// Saturating narrow int16 → uint8 (clips to [0,255])
+	WORD $0x2E212820            // SQXTUN  V0.8B,  V1.8H  (low 8 bytes)
+	WORD $0x6E212840            // SQXTUN2 V0.16B, V2.8H  (high 8 bytes)
+
+	// Store 16 result bytes
+	VST1 [V0.B16], (R0)
 
 	ADD $BPS, R0
 	SUBS $1, R5
-	BNE tm16_row
+	BNE tm16_neon_row
 	RET
 
 // func ve8uvasmNEON(dst []byte, off int)
@@ -300,7 +306,7 @@ dc8_store:
 	RET
 
 // func tm8uvasmNEON(dst []byte, off int)
-// TrueMotion 8x8. Scalar implementation.
+// TrueMotion 8x8. NEON vectorized.
 TEXT ·tm8uvasmNEON(SB), NOSPLIT, $0-32
 	MOVD dst_base+0(FP), R0
 	MOVD off+24(FP), R1
@@ -310,28 +316,29 @@ TEXT ·tm8uvasmNEON(SB), NOSPLIT, $0-32
 	MOVBU (R2), R3              // tl
 
 	SUB $BPS, R0, R2            // &top
+	VLD1 (R2), [V0.B8]         // V0 = 8 top pixels (uint8)
+
+	// Widen top pixels: uint8 → uint16
+	WORD $0x2F08A401            // UXTL V1.8H, V0.8B
+
+	// Broadcast tl as uint16, compute diff = top - tl
+	VDUP R3, V3.H8
+	VSUB V3.H8, V1.H8, V4.H8   // V4 = top - tl (int16)
 
 	MOVD $8, R5
-tm8_row:
+tm8_neon_row:
 	SUB $1, R0, R6
-	MOVBU (R6), R7
-	SUB R3, R7, R8              // base = left - tl
+	MOVBU (R6), R7              // left
 
-	MOVD $0, R9
-tm8_col:
-	MOVBU (R2)(R9), R10
-	ADD R8, R10
-	CMP $0, R10
-	CSEL LT, ZR, R10, R10
-	CMP $255, R10
-	MOVD $255, R11
-	CSEL GT, R11, R10, R10
-	MOVB R10, (R0)(R9)
-	ADD $1, R9
-	CMP $8, R9
-	BLT tm8_col
+	VDUP R7, V6.H8
+	VADD V4.H8, V6.H8, V1.H8   // V1 = left + (top - tl)
+
+	// Saturating narrow int16 → uint8
+	WORD $0x2E212820            // SQXTUN V0.8B, V1.8H
+
+	VST1 [V0.B8], (R0)
 
 	ADD $BPS, R0
 	SUBS $1, R5
-	BNE tm8_row
+	BNE tm8_neon_row
 	RET
