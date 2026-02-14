@@ -213,20 +213,22 @@ func estimateEntropy(argb []uint32, width, height, tx, ty, bits, mode int) float
 	}
 
 	// Shannon entropy summed across all 4 channel histograms.
+	// Uses fastSLog2(n) = n*log2(n) identity:
+	//   H*count = sum_ch(fastSLog2(count) - sum_bins(fastSLog2(h_i)))
 	entropy := 0.0
-	invCount := 1.0 / float64(count)
+	countU := uint32(count)
 	for ch := 0; ch < 4; ch++ {
+		channelEntropy := fastSLog2(countU)
 		base := ch * 256
 		for i := 0; i < 256; i++ {
-			h := histogram[base+i]
-			if h > 0 {
-				p := float64(h) * invCount
-				entropy -= p * math.Log2(p)
+			if histogram[base+i] > 0 {
+				channelEntropy -= fastSLog2(uint32(histogram[base+i]))
 			}
 		}
+		entropy += channelEntropy
 	}
 
-	return entropy * float64(count)
+	return entropy
 }
 
 // ---------------------------------------------------------------------------
@@ -563,15 +565,22 @@ func findBestMultiplier(source, target []int32) int8 {
 	return bestM
 }
 
+// multiplierDeltaTable is a precomputed [256][256]int32 table that maps
+// (multiplier+128, color) -> (multiplier * int8(color)) >> 5.
+// Eliminates per-call LUT rebuild in multiplierCost (~25M iterations saved).
+var multiplierDeltaTable [256][256]int32
+
+func init() {
+	for m := -128; m <= 127; m++ {
+		for c := 0; c < 256; c++ {
+			multiplierDeltaTable[m+128][c] = (int32(m) * int32(int8(c))) >> 5
+		}
+	}
+}
+
 // multiplierCost computes the total absolute residual for multiplier m.
 func multiplierCost(m int8, source, target []int32) int64 {
-	// Precompute delta LUT for all 256 possible source byte values.
-	// This replaces a multiply+shift per pixel with a table lookup.
-	var deltaLUT [256]int32
-	mi := int32(m)
-	for c := 0; c < 256; c++ {
-		deltaLUT[c] = (mi * int32(int8(c))) >> 5
-	}
+	deltaLUT := &multiplierDeltaTable[int(m)+128]
 
 	total := int64(0)
 	for i := range source {
