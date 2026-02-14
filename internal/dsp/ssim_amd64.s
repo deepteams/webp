@@ -5,7 +5,7 @@
 
 // func sse4x4SSE2(pix, ref []byte) int
 // Computes sum of squared differences for a 4x4 block with BPS stride.
-TEXT ·sse4x4SSE2(SB), NOSPLIT, $0-52
+TEXT ·sse4x4SSE2(SB), NOSPLIT, $0-56
 	MOVQ pix_base+0(FP), SI   // pix pointer
 	MOVQ ref_base+24(FP), DI  // ref pointer
 	PXOR X6, X6               // zero register for unpacking
@@ -59,7 +59,7 @@ TEXT ·sse4x4SSE2(SB), NOSPLIT, $0-52
 
 // func sse16x16SSE2(pix, ref []byte) int
 // Computes sum of squared differences for a 16x16 block with BPS stride.
-TEXT ·sse16x16SSE2(SB), NOSPLIT, $0-52
+TEXT ·sse16x16SSE2(SB), NOSPLIT, $0-56
 	MOVQ pix_base+0(FP), SI   // pix pointer
 	MOVQ ref_base+24(FP), DI  // ref pointer
 	PXOR X6, X6               // zero register
