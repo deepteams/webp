@@ -4,7 +4,7 @@
 
 // func sse4x4NEON(pix, ref []byte) int
 // SSE for 4x4 block with BPS=32 stride. Scalar ARM64 implementation.
-TEXT ·sse4x4NEON(SB), NOSPLIT, $0-52
+TEXT ·sse4x4NEON(SB), NOSPLIT, $0-56
 	MOVD pix_base+0(FP), R0    // pix
 	MOVD ref_base+24(FP), R1   // ref
 	MOVD $0, R5                // sum = 0
@@ -46,7 +46,7 @@ sse4x4_row:
 
 // func sse16x16NEON(pix, ref []byte) int
 // SSE for 16x16 block with BPS=32 stride. Scalar ARM64 implementation.
-TEXT ·sse16x16NEON(SB), NOSPLIT, $0-52
+TEXT ·sse16x16NEON(SB), NOSPLIT, $0-56
 	MOVD pix_base+0(FP), R0
 	MOVD ref_base+24(FP), R1
 	MOVD $0, R5                // sum = 0
