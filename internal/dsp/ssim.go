@@ -253,16 +253,6 @@ var SSE4x4 MetricFunc
 // SSE16x16 is the function variable for 16x16 SSE.
 var SSE16x16 MetricFunc
 
-// SSE4x4Direct is a direct call to sse4x4, bypassing the function variable.
-func SSE4x4Direct(pix, ref []byte) int {
-	return sse4x4(pix, ref)
-}
-
-// SSE16x16Direct is a direct call to sse16x16, bypassing the function variable.
-func SSE16x16Direct(pix, ref []byte) int {
-	return sse16x16(pix, ref)
-}
-
 // Perceptual weights for Hadamard-domain distortion (kWeightY from libwebp).
 var kWeightY = [16]uint16{
 	38, 32, 20, 9,

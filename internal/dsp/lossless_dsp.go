@@ -3,9 +3,23 @@ package dsp
 // VP8L color transforms (batch versions) from lossless.c.
 // These operate on slices of ARGB uint32 pixels.
 
+// Dispatch variables for SIMD-accelerated lossless transforms.
+var AddGreenToBlueAndRedFunc = addGreenToBlueAndRedGo
+var SubtractGreenFunc = subtractGreenGo
+
 // AddGreenToBlueAndRed adds the green channel to both the red and blue channels
 // for each pixel in the row. This is the inverse of the SubtractGreen transform.
 func AddGreenToBlueAndRed(argb []uint32, numPixels int) {
+	AddGreenToBlueAndRedFunc(argb, numPixels)
+}
+
+// SubtractGreen subtracts the green channel from both the red and blue channels
+// for each pixel. This is the forward SubtractGreen transform used in encoding.
+func SubtractGreen(argb []uint32, numPixels int) {
+	SubtractGreenFunc(argb, numPixels)
+}
+
+func addGreenToBlueAndRedGo(argb []uint32, numPixels int) {
 	for i := 0; i < numPixels; i++ {
 		p := argb[i]
 		green := (p >> 8) & 0xff
@@ -15,9 +29,7 @@ func AddGreenToBlueAndRed(argb []uint32, numPixels int) {
 	}
 }
 
-// SubtractGreen subtracts the green channel from both the red and blue channels
-// for each pixel. This is the forward SubtractGreen transform used in encoding.
-func SubtractGreen(argb []uint32, numPixels int) {
+func subtractGreenGo(argb []uint32, numPixels int) {
 	for i := 0; i < numPixels; i++ {
 		p := argb[i]
 		green := (p >> 8) & 0xff

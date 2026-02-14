@@ -407,17 +407,6 @@ func fTransform2(src, ref []byte, out []int16) {
 	fTransform(src[4:], ref[4:], out[16:])
 }
 
-// FTransformDirect is a direct call to fTransform, bypassing the function variable.
-// Use in encoder hot paths to avoid indirect call overhead and enable inlining hints.
-func FTransformDirect(src, ref []byte, out []int16) {
-	fTransform(src, ref, out)
-}
-
-// ITransformDirect is a direct call to iTransform, bypassing the function variable.
-func ITransformDirect(ref []byte, in []int16, dst []byte, doTwo bool) {
-	iTransform(ref, in, dst, doTwo)
-}
-
 // fTransformWHT computes the forward Walsh-Hadamard Transform on a flat 4x4
 // array of DC coefficients (stride 4). This corresponds to libwebp's
 // FTransformWHT_C adapted for a pre-extracted flat DC array rather than the
