@@ -37,8 +37,44 @@ func TrellisQuantizeBlock(
 	// every coefficient, the trellis result is trivially all-zero. This avoids
 	// the expensive main loop for flat/near-zero blocks (~30-50% of blocks).
 	{
-		allZero := true
-		for n := firstCoeff; n < 16; n++ {
+		nonZero := false
+		n := firstCoeff
+
+		// Handle DC coefficient separately (uses DCIQuant).
+		if n == 0 {
+			raw := int(in[KZigzag[0]])
+			if raw < 0 {
+				raw = -raw
+			}
+			coeff0 := raw + int(sq.Sharpen[KZigzag[0]])
+			if coeff0 < 0 {
+				coeff0 = 0
+			}
+			nonZero = coeff0*sq.DCIQuant>>17 > 0
+			n = 1
+		}
+
+		// AC coefficients (all use IQuant). Unrolled by 4.
+		iquant := sq.IQuant
+		for !nonZero && n+3 < 16 {
+			var maxCoeff int
+			for k := 0; k < 4; k++ {
+				raw := int(in[KZigzag[n+k]])
+				if raw < 0 {
+					raw = -raw
+				}
+				c := raw + int(sq.Sharpen[KZigzag[n+k]])
+				if c > maxCoeff {
+					maxCoeff = c
+				}
+			}
+			if maxCoeff > 0 && maxCoeff*iquant>>17 > 0 {
+				nonZero = true
+			}
+			n += 4
+		}
+		// Remainder.
+		for !nonZero && n < 16 {
 			raw := int(in[KZigzag[n]])
 			if raw < 0 {
 				raw = -raw
@@ -47,18 +83,13 @@ func TrellisQuantizeBlock(
 			if coeff0 < 0 {
 				coeff0 = 0
 			}
-			var iquant int
-			if n == 0 {
-				iquant = sq.DCIQuant
-			} else {
-				iquant = sq.IQuant
-			}
 			if coeff0*iquant>>17 > 0 {
-				allZero = false
-				break
+				nonZero = true
 			}
+			n++
 		}
-		if allZero {
+
+		if !nonZero {
 			for i := range out[:16] {
 				out[i] = 0
 			}

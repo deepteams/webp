@@ -45,19 +45,45 @@ func avg2(a, b uint32) uint32 {
 
 // selectPred implements the VP8L select predictor.
 // Compares per-component distance |T-TL| vs |L-TL| to decide T or L.
+// Unrolled for all 4 ARGB channels to avoid loop overhead.
 func selectPred(left, top, topLeft uint32) uint32 {
-	pa := int32(0)
-	for shift := uint(0); shift < 32; shift += 8 {
-		ac := int32((top>>shift)&0xff) - int32((topLeft>>shift)&0xff)
-		bc := int32((left>>shift)&0xff) - int32((topLeft>>shift)&0xff)
-		if ac < 0 {
-			ac = -ac
-		}
-		if bc < 0 {
-			bc = -bc
-		}
-		pa += ac - bc
+	// Channel 0 (blue, bits 0-7).
+	ac0 := int32(top&0xff) - int32(topLeft&0xff)
+	bc0 := int32(left&0xff) - int32(topLeft&0xff)
+	if ac0 < 0 {
+		ac0 = -ac0
 	}
+	if bc0 < 0 {
+		bc0 = -bc0
+	}
+	// Channel 1 (green, bits 8-15).
+	ac1 := int32((top>>8)&0xff) - int32((topLeft>>8)&0xff)
+	bc1 := int32((left>>8)&0xff) - int32((topLeft>>8)&0xff)
+	if ac1 < 0 {
+		ac1 = -ac1
+	}
+	if bc1 < 0 {
+		bc1 = -bc1
+	}
+	// Channel 2 (red, bits 16-23).
+	ac2 := int32((top>>16)&0xff) - int32((topLeft>>16)&0xff)
+	bc2 := int32((left>>16)&0xff) - int32((topLeft>>16)&0xff)
+	if ac2 < 0 {
+		ac2 = -ac2
+	}
+	if bc2 < 0 {
+		bc2 = -bc2
+	}
+	// Channel 3 (alpha, bits 24-31).
+	ac3 := int32(top>>24) - int32(topLeft>>24)
+	bc3 := int32(left>>24) - int32(topLeft>>24)
+	if ac3 < 0 {
+		ac3 = -ac3
+	}
+	if bc3 < 0 {
+		bc3 = -bc3
+	}
+	pa := (ac0 - bc0) + (ac1 - bc1) + (ac2 - bc2) + (ac3 - bc3)
 	if pa <= 0 {
 		return top
 	}

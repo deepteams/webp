@@ -28,8 +28,8 @@ func init() {
 
 	// DCT transforms.
 	ITransform = iTransformNEON
-	// FTransform: NEON is slower than Go for 4x4 blocks (16.5ns vs 13.1ns)
-	// due to strided byte packing overhead (INS chain or store-forward stall).
+	// FTransform: NEON is slower than Go for 4x4 blocks on M2 Pro (16.2ns vs 13.3ns,
+	// benchmarked 2026-02-15). Due to strided byte packing overhead (INS chain).
 	// Keep pure Go — the compiler generates excellent scalar code.
 
 	// Lossless color transforms.
@@ -105,3 +105,8 @@ func iTransformOneNEON(ref []byte, in []int16, dst []byte)
 
 //go:noescape
 func fTransformNEON(src, ref []byte, out []int16)
+
+// FTransformNEON is exported for benchmarking the NEON forward DCT.
+func FTransformNEON(src, ref []byte, out []int16) {
+	fTransformNEON(src, ref, out)
+}

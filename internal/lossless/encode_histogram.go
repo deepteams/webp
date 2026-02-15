@@ -341,9 +341,10 @@ func bitsEntropyUnrefined(array []uint32) bitEntropy {
 	return be
 }
 
-// fastSLog2LUTSize is the LUT size for fastSLog2. 4096 entries (32KB) covers
-// the vast majority of histogram count values encountered in practice.
-const fastSLog2LUTSize = 4096
+// fastSLog2LUTSize is the LUT size for fastSLog2. 65536 entries (512KB)
+// covers all realistic histogram count values, eliminating math.Log2 calls
+// in virtually all cases.
+const fastSLog2LUTSize = 65536
 
 // fastSLog2LUT is a precomputed lookup table for v * log2(v).
 var fastSLog2LUT [fastSLog2LUTSize]float64

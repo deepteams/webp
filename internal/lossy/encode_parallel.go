@@ -788,10 +788,11 @@ func tryI4ModesRDParallel(enc *VP8Encoder, w *RowWorker, mbX, mbY int, info *MBE
 
 			var bestMode uint8
 			var rate, disto int
+			maxModes := getMaxI4RDModes(enc.config.Quality)
 			if enc.config.Method >= 4 {
-				bestMode, _, rate, disto = pickBestI4ModeRDTrellisParallel(w, w.yuvIn, srcOff, w.yuvOut2, srcOff, seg, topMode, leftMode, hasTop, hasLeft, nzCtx, &enc.proba)
+				bestMode, _, rate, disto = pickBestI4ModeRDTrellisParallel(w, w.yuvIn, srcOff, w.yuvOut2, srcOff, seg, topMode, leftMode, hasTop, hasLeft, nzCtx, &enc.proba, maxModes)
 			} else {
-				bestMode, _, rate, disto = pickBestI4ModeRDParallel(w, w.yuvIn, srcOff, w.yuvOut2, srcOff, seg, topMode, leftMode, hasTop, hasLeft, nzCtx, &enc.proba)
+				bestMode, _, rate, disto = pickBestI4ModeRDParallel(w, w.yuvIn, srcOff, w.yuvOut2, srcOff, seg, topMode, leftMode, hasTop, hasLeft, nzCtx, &enc.proba, maxModes)
 			}
 			modes[blockIdx] = bestMode
 			totalRate += rate
@@ -838,7 +839,7 @@ func tryI4ModesRDParallel(enc *VP8Encoder, w *RowWorker, mbX, mbY int, info *MBE
 
 // pickBestI4ModeRDParallel evaluates I4 modes using worker buffers.
 func pickBestI4ModeRDParallel(w *RowWorker, srcBuf []byte, srcOff int, predBuf []byte, predOff int,
-	seg *SegmentInfo, topMode, leftMode uint8, hasTop, hasLeft bool, nzCtx int, proba *Proba) (bestMode uint8, bestScore uint64, bestRate int, bestDisto int) {
+	seg *SegmentInfo, topMode, leftMode uint8, hasTop, hasLeft bool, nzCtx int, proba *Proba, maxModes int) (bestMode uint8, bestScore uint64, bestRate int, bestDisto int) {
 	bestScore = ^uint64(0)
 	bestMode = BDCPred
 
@@ -864,7 +865,7 @@ func pickBestI4ModeRDParallel(w *RowWorker, srcBuf []byte, srcOff int, predBuf [
 	}
 
 	// Select top K modes by prediction SSE.
-	K := maxI4RDModes
+	K := maxModes
 	if nCandidates <= K {
 		K = nCandidates
 	}
@@ -923,14 +924,22 @@ func pickBestI4ModeRDParallel(w *RowWorker, srcBuf []byte, srcOff int, predBuf [
 	return
 }
 
+// getMaxI4RDModes returns the maximum number of I4 prediction modes to
+// evaluate with full RD, based on encoding quality. At low quality (< 50),
+// fewer modes are evaluated since the quality difference is negligible.
+func getMaxI4RDModes(quality int) int {
+	if quality < 50 {
+		return 2
+	}
+	return 3
+}
+
 // pickBestI4ModeRDTrellisParallel uses trellis quantization with worker buffers.
-// maxI4RDModes is the maximum number of I4 prediction modes to evaluate
-// with full RD. Modes are pre-screened by prediction SSE and only the
-// most promising ones get the expensive encode-decode cycle.
-const maxI4RDModes = 3
+// Modes are pre-screened by prediction SSE and only the most promising ones
+// get the expensive encode-decode cycle.
 
 func pickBestI4ModeRDTrellisParallel(w *RowWorker, srcBuf []byte, srcOff int, predBuf []byte, predOff int,
-	seg *SegmentInfo, topMode, leftMode uint8, hasTop, hasLeft bool, nzCtx int, proba *Proba) (bestMode uint8, bestScore uint64, bestRate int, bestDisto int) {
+	seg *SegmentInfo, topMode, leftMode uint8, hasTop, hasLeft bool, nzCtx int, proba *Proba, maxModes int) (bestMode uint8, bestScore uint64, bestRate int, bestDisto int) {
 	bestScore = ^uint64(0)
 	bestMode = BDCPred
 
@@ -956,7 +965,7 @@ func pickBestI4ModeRDTrellisParallel(w *RowWorker, srcBuf []byte, srcOff int, pr
 	}
 
 	// Select top K modes by prediction SSE (partial selection sort).
-	K := maxI4RDModes
+	K := maxModes
 	if nCandidates <= K {
 		K = nCandidates
 	}

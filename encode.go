@@ -165,6 +165,18 @@ type EncoderOptions struct {
 	// (lossy alpha). Matches C libwebp's WebPConfig::alpha_quality.
 	// The default value -1 (or any value < 0) is treated as 100.
 	AlphaQuality int
+
+	// ICC holds an ICC color profile to embed in the output.
+	// When non-nil, the encoder uses VP8X extended format with the ICCP chunk.
+	ICC []byte
+
+	// EXIF holds EXIF metadata to embed in the output.
+	// When non-nil, the encoder uses VP8X extended format with the EXIF chunk.
+	EXIF []byte
+
+	// XMP holds XMP metadata to embed in the output.
+	// When non-nil, the encoder uses VP8X extended format with the XMP chunk.
+	XMP []byte
 }
 
 // Options is an alias for backward compatibility.
@@ -412,7 +424,7 @@ func Encode(w io.Writer, img image.Image, opts *EncoderOptions) error {
 		return err
 	}
 
-	return writeRIFF(w, fourcc, bitstream, alphaData, img.Bounds().Dx(), img.Bounds().Dy())
+	return writeRIFF(w, fourcc, bitstream, alphaData, img.Bounds().Dx(), img.Bounds().Dy(), opts)
 }
 
 // encodeLossyWithAlpha encodes the image as a VP8 lossy bitstream and,
@@ -794,13 +806,16 @@ func cleanupTransparentAreaLossless(argb []uint32) {
 }
 
 // writeRIFF wraps a VP8/VP8L bitstream in a RIFF/WEBP container and writes it.
-// When alphaData is non-nil, it emits the VP8X extended format:
-//   RIFF header -> VP8X chunk -> ALPH chunk -> VP8 chunk
-// Otherwise it emits the simple format:
-//   RIFF header -> VP8/VP8L chunk
-func writeRIFF(w io.Writer, fourcc uint32, bitstream, alphaData []byte, width, height int) error {
-	if len(alphaData) > 0 {
-		return writeRIFFExtended(w, bitstream, alphaData, width, height)
+// When alphaData or metadata (ICC/EXIF/XMP) is present, it emits the VP8X
+// extended format. Otherwise it emits the simple format.
+func writeRIFF(w io.Writer, fourcc uint32, bitstream, alphaData []byte, width, height int, opts *EncoderOptions) error {
+	hasMetadata := opts != nil && (len(opts.ICC) > 0 || len(opts.EXIF) > 0 || len(opts.XMP) > 0)
+	if len(alphaData) > 0 || hasMetadata {
+		var icc, exif, xmp []byte
+		if opts != nil {
+			icc, exif, xmp = opts.ICC, opts.EXIF, opts.XMP
+		}
+		return writeRIFFExtended(w, fourcc, bitstream, alphaData, width, height, icc, exif, xmp)
 	}
 	return writeRIFFSimple(w, fourcc, bitstream)
 }
@@ -837,32 +852,61 @@ func writeRIFFSimple(w io.Writer, fourcc uint32, bitstream []byte) error {
 	return err
 }
 
-// writeRIFFExtended writes the VP8X extended RIFF/WEBP container with an ALPH
-// chunk followed by the VP8 chunk. This matches the C libwebp layout:
-//   RIFF header (12 bytes)
-//   VP8X chunk  (8 + 10 bytes)
-//   ALPH chunk  (8 + alpha data, padded to even)
-//   VP8 chunk   (8 + VP8 bitstream, padded to even)
-func writeRIFFExtended(w io.Writer, vp8Data, alphaData []byte, width, height int) error {
+// writeRIFFExtended writes the VP8X extended RIFF/WEBP container.
+// The chunk order follows the WebP spec:
+//
+//	RIFF header -> VP8X -> [ICCP] -> [ALPH] -> VP8/VP8L -> [EXIF] -> [XMP]
+func writeRIFFExtended(w io.Writer, fourcc uint32, bitstreamData, alphaData []byte, width, height int, icc, exif, xmp []byte) error {
 	const vp8xChunkSize = container.VP8XChunkSize // 10 bytes
-	const alphaFlag = 0x00000010
 
-	alphaSize := uint32(len(alphaData))
-	paddedAlpha := alphaSize + (alphaSize & 1)
+	// Build VP8X flags.
+	var flags uint32
+	if len(alphaData) > 0 {
+		flags |= 0x00000010 // bit 4 = alpha
+	}
+	// VP8L bitstream carries alpha in its header (bit 28 of the packed field).
+	if fourcc == container.FourCCVP8L && len(bitstreamData) >= 5 &&
+		bitstreamData[0] == container.VP8LMagicByte {
+		bits := binary.LittleEndian.Uint32(bitstreamData[1:5])
+		if (bits>>28)&0x1 != 0 {
+			flags |= 0x00000010
+		}
+	}
+	if len(icc) > 0 {
+		flags |= 0x00000020 // bit 5 = ICC (note: bit 0 in some docs, bit 5 per mux/demux.go flagICCP = 1<<5)
+	}
+	if len(exif) > 0 {
+		flags |= 0x00000008 // bit 3 = EXIF
+	}
+	if len(xmp) > 0 {
+		flags |= 0x00000004 // bit 2 = XMP
+	}
 
-	vp8Size := uint32(len(vp8Data))
-	paddedVP8 := vp8Size + (vp8Size & 1)
+	// Helper: padded chunk size (header + data + padding).
+	paddedChunkSize := func(dataLen int) uint32 {
+		n := uint32(dataLen)
+		return container.ChunkHeaderSize + n + (n & 1)
+	}
 
-	// RIFF file size = 4 ("WEBP")
-	//   + 8 (VP8X header) + 10 (VP8X data)
-	//   + 8 (ALPH header) + paddedAlpha
-	//   + 8 (VP8 header)  + paddedVP8
-	riffSize := uint32(4) +
-		container.ChunkHeaderSize + vp8xChunkSize +
-		container.ChunkHeaderSize + paddedAlpha +
-		container.ChunkHeaderSize + paddedVP8
+	// Calculate total RIFF payload.
+	riffSize := uint32(4) + // "WEBP"
+		container.ChunkHeaderSize + vp8xChunkSize // VP8X
 
-	totalSize := 8 + riffSize // 8 = "RIFF" + riffSize field
+	if len(icc) > 0 {
+		riffSize += paddedChunkSize(len(icc))
+	}
+	if len(alphaData) > 0 {
+		riffSize += paddedChunkSize(len(alphaData))
+	}
+	riffSize += paddedChunkSize(len(bitstreamData))
+	if len(exif) > 0 {
+		riffSize += paddedChunkSize(len(exif))
+	}
+	if len(xmp) > 0 {
+		riffSize += paddedChunkSize(len(xmp))
+	}
+
+	totalSize := 8 + riffSize
 	buf := make([]byte, totalSize)
 	off := 0
 
@@ -879,35 +923,48 @@ func writeRIFFExtended(w io.Writer, vp8Data, alphaData []byte, width, height int
 	off += 4
 	binary.LittleEndian.PutUint32(buf[off:], vp8xChunkSize)
 	off += 4
-	binary.LittleEndian.PutUint32(buf[off:], alphaFlag) // flags
+	binary.LittleEndian.PutUint32(buf[off:], flags)
 	off += 4
-	// Canvas width-1 and height-1 as 24-bit little-endian values.
 	putLE24(buf[off:], uint32(width-1))
 	off += 3
 	putLE24(buf[off:], uint32(height-1))
 	off += 3
 
-	// ALPH chunk.
-	binary.LittleEndian.PutUint32(buf[off:], container.FourCCALPH)
-	off += 4
-	binary.LittleEndian.PutUint32(buf[off:], alphaSize)
-	off += 4
-	copy(buf[off:], alphaData)
-	off += int(alphaSize)
-	if alphaSize&1 != 0 {
-		buf[off] = 0
-		off++
+	// writeChunk is a helper to write a chunk inline into buf.
+	writeChunk := func(fcc uint32, data []byte) {
+		binary.LittleEndian.PutUint32(buf[off:], fcc)
+		off += 4
+		binary.LittleEndian.PutUint32(buf[off:], uint32(len(data)))
+		off += 4
+		copy(buf[off:], data)
+		off += len(data)
+		if len(data)&1 != 0 {
+			buf[off] = 0
+			off++
+		}
 	}
 
-	// VP8 chunk.
-	binary.LittleEndian.PutUint32(buf[off:], container.FourCCVP8)
-	off += 4
-	binary.LittleEndian.PutUint32(buf[off:], vp8Size)
-	off += 4
-	copy(buf[off:], vp8Data)
-	off += int(vp8Size)
-	if vp8Size&1 != 0 {
-		buf[off] = 0
+	// ICCP chunk.
+	if len(icc) > 0 {
+		writeChunk(container.FourCCICCP, icc)
+	}
+
+	// ALPH chunk.
+	if len(alphaData) > 0 {
+		writeChunk(container.FourCCALPH, alphaData)
+	}
+
+	// VP8/VP8L bitstream chunk.
+	writeChunk(fourcc, bitstreamData)
+
+	// EXIF chunk.
+	if len(exif) > 0 {
+		writeChunk(container.FourCCEXIF, exif)
+	}
+
+	// XMP chunk.
+	if len(xmp) > 0 {
+		writeChunk(container.FourCCXMP, xmp)
 	}
 
 	_, err := w.Write(buf)

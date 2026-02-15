@@ -562,3 +562,185 @@ func TestMetadataRoundTrip(t *testing.T) {
 		t.Errorf("XMP = %q, want %q", xmp, xmpData)
 	}
 }
+
+// TestEncodeWithMetadata_Lossy verifies that Encode() with ICC/EXIF/XMP in
+// EncoderOptions produces a VP8X extended file that a Demuxer can parse.
+func TestEncodeWithMetadata_Lossy(t *testing.T) {
+	const W, H = 16, 16
+	iccData := []byte("test ICC profile payload")
+	exifData := []byte("test EXIF metadata payload")
+	xmpData := []byte("test XMP metadata payload")
+
+	img := image.NewNRGBA(image.Rect(0, 0, W, H))
+	for i := range img.Pix {
+		img.Pix[i] = 128
+	}
+
+	opts := DefaultOptions()
+	opts.ICC = iccData
+	opts.EXIF = exifData
+	opts.XMP = xmpData
+
+	var buf bytes.Buffer
+	if err := Encode(&buf, img, opts); err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+
+	data := buf.Bytes()
+	d, err := mux.NewDemuxer(data)
+	if err != nil {
+		t.Fatalf("NewDemuxer: %v", err)
+	}
+
+	feat := d.GetFeatures()
+	if !feat.HasICC {
+		t.Error("HasICC should be true")
+	}
+	if !feat.HasEXIF {
+		t.Error("HasEXIF should be true")
+	}
+	if !feat.HasXMP {
+		t.Error("HasXMP should be true")
+	}
+	if feat.Width != W || feat.Height != H {
+		t.Errorf("dimensions = %dx%d, want %dx%d", feat.Width, feat.Height, W, H)
+	}
+
+	icc, err := d.GetChunk(mux.FourCCICCP)
+	if err != nil {
+		t.Fatalf("GetChunk(ICCP): %v", err)
+	}
+	if !bytes.Equal(icc, iccData) {
+		t.Errorf("ICC mismatch: got %d bytes, want %d", len(icc), len(iccData))
+	}
+
+	exif, err := d.GetChunk(mux.FourCCEXIF)
+	if err != nil {
+		t.Fatalf("GetChunk(EXIF): %v", err)
+	}
+	if !bytes.Equal(exif, exifData) {
+		t.Errorf("EXIF mismatch: got %d bytes, want %d", len(exif), len(exifData))
+	}
+
+	xmp, err := d.GetChunk(mux.FourCCXMP)
+	if err != nil {
+		t.Fatalf("GetChunk(XMP): %v", err)
+	}
+	if !bytes.Equal(xmp, xmpData) {
+		t.Errorf("XMP mismatch: got %d bytes, want %d", len(xmp), len(xmpData))
+	}
+
+	// Verify the image is still decodable.
+	decoded, err := Decode(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if decoded.Bounds().Dx() != W || decoded.Bounds().Dy() != H {
+		t.Errorf("decoded dimensions = %dx%d, want %dx%d",
+			decoded.Bounds().Dx(), decoded.Bounds().Dy(), W, H)
+	}
+}
+
+// TestEncodeWithMetadata_Lossless verifies VP8L + metadata round-trip.
+func TestEncodeWithMetadata_Lossless(t *testing.T) {
+	const W, H = 8, 8
+	iccData := []byte("lossless ICC profile")
+	exifData := []byte("lossless EXIF data")
+
+	img := image.NewNRGBA(image.Rect(0, 0, W, H))
+	for y := 0; y < H; y++ {
+		for x := 0; x < W; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{R: uint8(x * 32), G: uint8(y * 32), B: 100, A: 255})
+		}
+	}
+
+	opts := DefaultOptions()
+	opts.Lossless = true
+	opts.ICC = iccData
+	opts.EXIF = exifData
+
+	var buf bytes.Buffer
+	if err := Encode(&buf, img, opts); err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+
+	data := buf.Bytes()
+	d, err := mux.NewDemuxer(data)
+	if err != nil {
+		t.Fatalf("NewDemuxer: %v", err)
+	}
+
+	feat := d.GetFeatures()
+	if !feat.HasICC {
+		t.Error("HasICC should be true")
+	}
+	if !feat.HasEXIF {
+		t.Error("HasEXIF should be true")
+	}
+	if feat.HasXMP {
+		t.Error("HasXMP should be false (not set)")
+	}
+
+	icc, err := d.GetChunk(mux.FourCCICCP)
+	if err != nil {
+		t.Fatalf("GetChunk(ICCP): %v", err)
+	}
+	if !bytes.Equal(icc, iccData) {
+		t.Errorf("ICC mismatch")
+	}
+
+	exif, err := d.GetChunk(mux.FourCCEXIF)
+	if err != nil {
+		t.Fatalf("GetChunk(EXIF): %v", err)
+	}
+	if !bytes.Equal(exif, exifData) {
+		t.Errorf("EXIF mismatch")
+	}
+
+	// Verify lossless round-trip pixel accuracy.
+	decoded, err := Decode(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	for y := 0; y < H; y++ {
+		for x := 0; x < W; x++ {
+			want := img.NRGBAAt(x, y)
+			r, g, b, a := decoded.At(x, y).RGBA()
+			got := color.NRGBA{R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: uint8(a >> 8)}
+			if want != got {
+				t.Errorf("pixel (%d,%d) = %v, want %v", x, y, got, want)
+			}
+		}
+	}
+}
+
+// TestEncodeWithMetadata_NoMetadata verifies that Encode without metadata
+// produces a simple (non-VP8X) container.
+func TestEncodeWithMetadata_NoMetadata(t *testing.T) {
+	const W, H = 4, 4
+	img := image.NewNRGBA(image.Rect(0, 0, W, H))
+	for y := 0; y < H; y++ {
+		for x := 0; x < W; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{R: 200, G: 200, B: 200, A: 255})
+		}
+	}
+
+	opts := DefaultOptions()
+	// No ICC/EXIF/XMP set.
+
+	var buf bytes.Buffer
+	if err := Encode(&buf, img, opts); err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+
+	// Simple format should NOT have VP8X.
+	data := buf.Bytes()
+	if len(data) < 16 {
+		t.Fatal("output too small")
+	}
+	// Check the first chunk after RIFF header (12 bytes) is VP8 or VP8L, not VP8X.
+	chunkID := string(data[12:16])
+	if chunkID == "VP8X" {
+		t.Error("simple encode without metadata should not produce VP8X container")
+	}
+}

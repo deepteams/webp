@@ -1313,7 +1313,7 @@ func (enc *VP8Encoder) PickBestI4ModeRDTrellis(srcBuf []byte, srcOff int, predBu
 	}
 
 	// Select top K modes by prediction SSE (partial selection sort).
-	K := maxI4RDModes
+	K := getMaxI4RDModes(enc.config.Quality)
 	if nCandidates <= K {
 		K = nCandidates
 	}
