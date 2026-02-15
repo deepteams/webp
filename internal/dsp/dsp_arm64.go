@@ -28,8 +28,9 @@ func init() {
 
 	// DCT transforms.
 	ITransform = iTransformNEON
-	// FTransform: NEON is slower than Go for 4x4 blocks (18.5ns vs 13.4ns)
-	// due to strided byte packing overhead. Keep pure Go.
+	// FTransform: NEON is slower than Go for 4x4 blocks (16.5ns vs 13.1ns)
+	// due to strided byte packing overhead (INS chain or store-forward stall).
+	// Keep pure Go — the compiler generates excellent scalar code.
 
 	// Lossless color transforms.
 	AddGreenToBlueAndRedFunc = addGreenToBlueAndRedNEON

@@ -511,7 +511,8 @@ TEXT ·iTransformOneNEON(SB), NOSPLIT, $0-72
 
 // func fTransformNEON(src, ref []byte, out []int16)
 // NEON forward DCT 4x4. src/ref stride=BPS=32.
-// Uses out[] as scratch for byte packing.
+// Uses MOVWU+INS for direct strided load (no scratch buffer).
+// Uses MLA/MLS for fused multiply-accumulate.
 TEXT ·fTransformNEON(SB), NOSPLIT, $0-72
 	MOVD src_base+0(FP), R0
 	MOVD ref_base+24(FP), R1
@@ -527,38 +528,34 @@ TEXT ·fTransformNEON(SB), NOSPLIT, $0-72
 	MOVW $937, R3
 	VDUP R3, V25.S4
 
-	// Load src (stride 32), pack into out[] scratch
-	MOVWU (R0), R3
-	MOVWU 32(R0), R4
-	MOVWU 64(R0), R5
-	MOVWU 96(R0), R6
-	MOVW R3, (R2)
-	MOVW R4, 4(R2)
-	MOVW R5, 8(R2)
-	MOVW R6, 12(R2)
-	// Load ref (stride 32), pack at out+16
-	MOVWU (R1), R3
-	MOVWU 32(R1), R4
-	MOVWU 64(R1), R5
-	MOVWU 96(R1), R6
-	MOVW R3, 16(R2)
-	MOVW R4, 20(R2)
-	MOVW R5, 24(R2)
-	MOVW R6, 28(R2)
-	VLD1 (R2), [V24.B16, V25.B16]
+	// Load src (stride 32) into V0 via MOVWU + INS (no scratch buffer)
+	MOVWU (R0), R5
+	MOVWU 32(R0), R6
+	MOVWU 64(R0), R7
+	MOVWU 96(R0), R8
+	WORD $0x4E041CA0    // INS V0.S[0], W5
+	WORD $0x4E0C1CC0    // INS V0.S[1], W6
+	WORD $0x4E141CE0    // INS V0.S[2], W7
+	WORD $0x4E1C1D00    // INS V0.S[3], W8
+
+	// Load ref (stride 32) into V1 via MOVWU + INS
+	MOVWU (R1), R5
+	MOVWU 32(R1), R6
+	MOVWU 64(R1), R7
+	MOVWU 96(R1), R8
+	WORD $0x4E041CA1    // INS V1.S[0], W5
+	WORD $0x4E0C1CC1    // INS V1.S[1], W6
+	WORD $0x4E141CE1    // INS V1.S[2], W7
+	WORD $0x4E1C1D01    // INS V1.S[3], W8
 
 	// Widen uint8→uint16
-	WORD $0x2f08a702    // UXTL  V2.8H, V24.8B
-	WORD $0x6f08a703    // UXTL2 V3.8H, V24.16B
-	WORD $0x2f08a724    // UXTL  V4.8H, V25.8B
-	WORD $0x6f08a725    // UXTL2 V5.8H, V25.16B
+	WORD $0x2f08a402    // UXTL  V2.8H, V0.8B
+	WORD $0x6f08a403    // UXTL2 V3.8H, V0.16B
+	WORD $0x2f08a424    // UXTL  V4.8H, V1.8B
+	WORD $0x6f08a425    // UXTL2 V5.8H, V1.16B
 	// diff = src - ref (int16)
 	VSUB V4.H8, V2.H8, V0.H8
 	VSUB V5.H8, V3.H8, V1.H8
-
-	// Reload V25 constant (clobbered by VLD1)
-	MOVW $937, R3
-	VDUP R3, V25.S4
 
 	// Widen diff int16→int32
 	WORD $0x0f10a410    // SXTL  V16.4S, V0.4H
@@ -585,16 +582,14 @@ TEXT ·fTransformNEON(SB), NOSPLIT, $0-72
 	WORD $0x4f235694               // SHL V20, #3  → (a0+a1)*8
 	VSUB V5.S4, V4.S4, V22.S4    // a0-a1
 	WORD $0x4f2356d6               // SHL V22, #3  → (a0-a1)*8
-	// (a2*2217+a3*5352+1812)>>9
-	WORD $0x4ebc9cd5               // V21 = V6*2217
-	WORD $0x4ebd9cf0               // V16 = V7*5352
-	VADD V16.S4, V21.S4, V21.S4
+	// (a2*2217+a3*5352+1812)>>9  — MUL+MLA fused
+	WORD $0x4ebc9cd5               // MUL V21.4S, V6.4S, V28.4S   (a2*2217)
+	WORD $0x4ebd94f5               // MLA V21.4S, V7.4S, V29.4S   (+a3*5352)
 	VADD V26.S4, V21.S4, V21.S4
 	WORD $0x4f3706b5               // SSHR V21, #9
-	// (a3*2217-a2*5352+937)>>9
-	WORD $0x4ebc9cf7               // V23 = V7*2217
-	WORD $0x4ebd9cd0               // V16 = V6*5352
-	VSUB V16.S4, V23.S4, V23.S4
+	// (a3*2217-a2*5352+937)>>9  — MUL+MLS fused
+	WORD $0x4ebc9cf7               // MUL V23.4S, V7.4S, V28.4S   (a3*2217)
+	WORD $0x6ebd94d7               // MLS V23.4S, V6.4S, V29.4S   (-a2*5352)
 	VADD V25.S4, V23.S4, V23.S4
 	WORD $0x4f3706f7               // SSHR V23, #9
 
@@ -629,20 +624,18 @@ TEXT ·fTransformNEON(SB), NOSPLIT, $0-72
 	VSUB V5.S4, V4.S4, V18.S4
 	VADD V30.S4, V18.S4, V18.S4
 	WORD $0x4f3c0652               // SSHR V18, #4
-	// out_row1 = (a2*2217+a3*5352+12000)>>16 + b2i(a3!=0)
-	WORD $0x4ebc9cd1               // V17 = V6*2217
-	WORD $0x4ebd9cf3               // V19 = V7*5352
-	VADD V19.S4, V17.S4, V17.S4
+	// out_row1 = (a2*2217+a3*5352+12000)>>16 + b2i(a3!=0) — MUL+MLA
+	WORD $0x4ebc9cd1               // MUL V17.4S, V6.4S, V28.4S
+	WORD $0x4ebd94f1               // MLA V17.4S, V7.4S, V29.4S
 	VADD V31.S4, V17.S4, V17.S4
 	WORD $0x4f300631               // SSHR V17, #16
 	WORD $0x4ea098f4               // CMEQ V20, V7, #0
 	WORD $0x6e205a94               // MVN  V20, V20
 	VUSHR $31, V20.S4, V20.S4
 	VADD V20.S4, V17.S4, V17.S4
-	// out_row3 = (a3*2217-a2*5352+51000)>>16
-	WORD $0x4ebc9cf3               // V19 = V7*2217
-	WORD $0x4ebd9cd4               // V20 = V6*5352
-	VSUB V20.S4, V19.S4, V19.S4
+	// out_row3 = (a3*2217-a2*5352+51000)>>16 — MUL+MLS
+	WORD $0x4ebc9cf3               // MUL V19.4S, V7.4S, V28.4S
+	WORD $0x6ebd94d3               // MLS V19.4S, V6.4S, V29.4S
 	VADD V27.S4, V19.S4, V19.S4
 	WORD $0x4f300673               // SSHR V19, #16
 

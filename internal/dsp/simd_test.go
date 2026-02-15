@@ -583,3 +583,97 @@ func BenchmarkTransformWHTDispatch(b *testing.B) {
 		TransformWHT(in, out)
 	}
 }
+
+func BenchmarkHE16Go(b *testing.B) {
+	rng := rand.New(rand.NewSource(104))
+	buf, off := makePredBuf16(rng)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		he16(buf, off)
+	}
+}
+
+func BenchmarkHE16Dispatch(b *testing.B) {
+	rng := rand.New(rand.NewSource(104))
+	buf, off := makePredBuf16(rng)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		PredLuma16[3](buf, off)
+	}
+}
+
+func BenchmarkDC8uvGo(b *testing.B) {
+	rng := rand.New(rand.NewSource(105))
+	buf, off := makePredBuf8(rng)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		dc8uv(buf, off)
+	}
+}
+
+func BenchmarkDC8uvDispatch(b *testing.B) {
+	rng := rand.New(rand.NewSource(105))
+	buf, off := makePredBuf8(rng)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		PredChroma8[0](buf, off)
+	}
+}
+
+func BenchmarkVE8uvGo(b *testing.B) {
+	rng := rand.New(rand.NewSource(106))
+	buf, off := makePredBuf8(rng)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ve8uv(buf, off)
+	}
+}
+
+func BenchmarkVE8uvDispatch(b *testing.B) {
+	rng := rand.New(rand.NewSource(106))
+	buf, off := makePredBuf8(rng)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		PredChroma8[2](buf, off)
+	}
+}
+
+func BenchmarkHE8uvGo(b *testing.B) {
+	rng := rand.New(rand.NewSource(107))
+	buf, off := makePredBuf8(rng)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		he8uv(buf, off)
+	}
+}
+
+func BenchmarkHE8uvDispatch(b *testing.B) {
+	rng := rand.New(rand.NewSource(107))
+	buf, off := makePredBuf8(rng)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		PredChroma8[3](buf, off)
+	}
+}
+
+func BenchmarkSubtractGreenGo(b *testing.B) {
+	pixels := make([]uint32, 256)
+	for i := range pixels {
+		pixels[i] = uint32(i * 0x01010101)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		subtractGreenGo(pixels, len(pixels))
+	}
+}
+
+func BenchmarkSubtractGreenDispatch(b *testing.B) {
+	pixels := make([]uint32, 256)
+	for i := range pixels {
+		pixels[i] = uint32(i * 0x01010101)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		SubtractGreen(pixels, len(pixels))
+	}
+}
