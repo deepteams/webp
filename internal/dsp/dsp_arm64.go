@@ -6,8 +6,9 @@ func init() {
 	// Override pure-Go implementations with NEON assembly.
 	// This init() runs after dsp.go's init() due to alphabetical ordering.
 
-	// SSE metrics: keep Go versions (scalar assembly is slower than
-	// Go's optimized scalar; needs real NEON SIMD to beat the compiler).
+	// SSE metrics (NEON SIMD).
+	SSE4x4 = sse4x4NEON
+	SSE16x16 = sse16x16NEON
 
 	// WHT transforms.
 	FTransformWHT = fTransformWHTNEON
@@ -27,8 +28,8 @@ func init() {
 
 	// DCT transforms.
 	ITransform = iTransformNEON
-	// FTransform: NEON is slower than Go for 4x4 blocks due to
-	// strided byte packing overhead. Keep pure Go.
+	// FTransform: NEON is slower than Go for 4x4 blocks (18.5ns vs 13.4ns)
+	// due to strided byte packing overhead. Keep pure Go.
 
 	// Lossless color transforms.
 	AddGreenToBlueAndRedFunc = addGreenToBlueAndRedNEON

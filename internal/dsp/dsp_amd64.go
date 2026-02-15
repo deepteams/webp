@@ -26,6 +26,9 @@ func init() {
 	PredChroma8[2] = ve8uvSSE2
 	PredChroma8[3] = he8uvSSE2
 
+	// DCT transforms.
+	FTransform = fTransformSSE2
+
 	// Lossless color transforms.
 	AddGreenToBlueAndRedFunc = addGreenToBlueAndRedSSE2
 	SubtractGreenFunc = subtractGreenSSE2
@@ -68,6 +71,9 @@ func dc8uvasmSSE2(dst []byte, off int)
 
 //go:noescape
 func tm8uvasmSSE2(dst []byte, off int)
+
+//go:noescape
+func fTransformSSE2(src, ref []byte, out []int16)
 
 //go:noescape
 func addGreenToBlueAndRedSSE2(argb []uint32, numPixels int)
