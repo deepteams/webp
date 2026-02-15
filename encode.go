@@ -67,7 +67,7 @@ type EncoderOptions struct {
 	// (lossy encoding only). This is a bitmask matching C libwebp's
 	// WebPConfig::preprocessing field:
 	//   0 = none
-	//   1 = segment smooth (not yet implemented)
+	//   1 = segment smooth (not implemented; rarely used even in C libwebp)
 	//   2 = pseudo-random dithering on RGB->YUV conversion
 	// When bit 2 is set, ordered dithering noise is added to the rounding
 	// values during the RGB->YUV color space conversion. The amplitude
@@ -119,7 +119,7 @@ type EncoderOptions struct {
 	// EmulateJpegSize, when true, tries to produce an output of similar
 	// size to a JPEG file of equivalent quality. This is a best-effort
 	// heuristic. Matches C libwebp's WebPConfig::emulate_jpeg_size.
-	// TODO: not yet implemented; the field is accepted but has no effect.
+	// Note: not implemented; the field is accepted but has no effect.
 	EmulateJpegSize bool
 
 	// QMin sets the minimum quantizer value (0-100, default 0).

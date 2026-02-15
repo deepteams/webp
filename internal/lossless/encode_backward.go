@@ -484,6 +484,10 @@ func CalculateBestCacheSize(argb []uint32, quality int, refs *BackwardRefs, cach
 	//
 	// The key optimization from the C reference: cache keys for smaller
 	// cache sizes can be derived from the largest one by right-shifting.
+	// Pre-extract histos[0] to avoid repeated slice indexing.
+	h0 := histos[0]
+	_ = h0.Literal[255] // BCE: prove Literal has at least 256 entries
+
 	argbIdx := 0
 	for ri := range refs.refs {
 		v := &refs.refs[ri]
@@ -498,10 +502,10 @@ func CalculateBestCacheSize(argb []uint32, quality int, refs *BackwardRefs, cach
 			key := int((pix * kHashMul) >> uint(32-cacheBitsMax))
 
 			// cache_bits = 0: always a literal (no cache).
-			histos[0].Blue[b]++
-			histos[0].Literal[g]++
-			histos[0].Red[r]++
-			histos[0].Alpha[a]++
+			h0.Blue[b]++
+			h0.Literal[g]++
+			h0.Red[r]++
+			h0.Alpha[a]++
 
 			// cache_bits = cacheBitsMax down to 1.
 			for i := cacheBitsMax; i >= 1; i-- {

@@ -150,7 +150,7 @@ func decodeBytes(data []byte) (image.Image, error) {
 		return nil, ErrNoFrames
 	}
 
-	// For now, decode the first frame only (animation not yet supported).
+	// Decode the first frame only; use animation.Decode() for multi-frame.
 	frame := frames[0]
 	return decodeFrame(frame)
 }

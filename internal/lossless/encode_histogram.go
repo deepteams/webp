@@ -254,6 +254,12 @@ func getCombinedEntropyUnrefined(X, Y []uint32) (bitEntropy, streaks) {
 	if length == 0 {
 		return be, st
 	}
+	if len(Y) < length {
+		length = len(Y)
+	}
+	// BCE hints: prove X[i] and Y[i] are in bounds for i < length.
+	_ = X[length-1]
+	_ = Y[length-1]
 
 	iPrev := 0
 	xyPrev := X[0] + Y[0]
@@ -352,7 +358,8 @@ func init() {
 // fastSLog2 computes v * log2(v) for v > 0, returning 0 for v == 0.
 func fastSLog2(v uint32) float64 {
 	if v < fastSLog2LUTSize {
-		return fastSLog2LUT[v]
+		// Bitmask eliminates bounds check; fastSLog2LUTSize is a power of 2.
+		return fastSLog2LUT[v&(fastSLog2LUTSize-1)]
 	}
 	fv := float64(v)
 	return fv * math.Log2(fv)
@@ -447,6 +454,8 @@ func extraCost(population []uint32, length int) float64 {
 	if length < 6 {
 		return 0
 	}
+	// BCE hint: prove all accesses up to 2*(halfLen-1)+3 are in bounds.
+	_ = population[length-1]
 	var cost float64
 	cost += float64(population[4] + population[5])
 	halfLen := length/2 - 1
@@ -600,6 +609,12 @@ func histogramAdd(a, b, out *Histogram) {
 	litLen := len(a.Literal)
 	if bLen := len(b.Literal); bLen < litLen {
 		litLen = bLen
+	}
+	if litLen > 0 {
+		// BCE hints for Literal slice access.
+		_ = a.Literal[litLen-1]
+		_ = b.Literal[litLen-1]
+		_ = out.Literal[litLen-1]
 	}
 	for i := 0; i < litLen; i++ {
 		out.Literal[i] = a.Literal[i] + b.Literal[i]
@@ -911,13 +926,24 @@ func histogramCombineEntropyBin(imageHisto *HistoSet, numBins int,
 			imageHisto.remove(idx)
 			histograms = imageHisto.histos
 		} else {
+			const maxCombineFailures = 32
 			bitCost := histograms[idx].bitCost
 			bitCostThresh := -(bitCost * combineCostFactor / 100.0)
+
+			// Pre-filter: if the first histogram's cost is much larger than the
+			// candidate's, the merge threshold is unlikely to be met. Skip the
+			// expensive entropy evaluation when the cost ratio is extreme and
+			// we've already accumulated some failures for this bin.
+			firstCost := histograms[first].bitCost
+			costRatio := firstCost / (bitCost + 1)
+			if costRatio > 20 && bins[bID].numCombineFailures > maxCombineFailures/2 {
+				idx++
+				continue
+			}
 
 			_, ok := histogramAddEvalThresh(histograms[first], histograms[idx],
 				curCombo, bitCostThresh)
 			if ok {
-				const maxCombineFailures = 32
 				tryCombine := curCombo.trivialSymbol[histRed] != nonTrivialSym &&
 					curCombo.trivialSymbol[histBlue] != nonTrivialSym &&
 					curCombo.trivialSymbol[histAlpha] != nonTrivialSym

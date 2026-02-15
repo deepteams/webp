@@ -7,6 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/deepteams/webp/animation"
+	"github.com/deepteams/webp/mux"
 )
 
 func testdataPath(name string) string {
@@ -315,5 +319,181 @@ func TestImageDecodeConfig_LibwebpTest(t *testing.T) {
 	}
 	if cfg.Width != 128 || cfg.Height != 128 {
 		t.Errorf("dimensions = %dx%d, want 128x128", cfg.Width, cfg.Height)
+	}
+}
+
+// --- Animated image tests ---
+
+func TestDecodeAnimatedReturnsFirstFrame(t *testing.T) {
+	// Create a 3-frame animation.
+	const W, H = 16, 16
+	var buf bytes.Buffer
+	enc := animation.NewEncoder(&buf, W, H, nil)
+
+	for i := 0; i < 3; i++ {
+		img := image.NewNRGBA(image.Rect(0, 0, W, H))
+		c := color.NRGBA{R: uint8(i * 80), G: 128, B: 0, A: 255}
+		for y := 0; y < H; y++ {
+			for x := 0; x < W; x++ {
+				img.SetNRGBA(x, y, c)
+			}
+		}
+		if err := enc.AddFrame(img, 100*time.Millisecond); err != nil {
+			t.Fatalf("AddFrame %d: %v", i, err)
+		}
+	}
+	if err := enc.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Decode with the top-level Decode (should return first frame).
+	decoded, err := Decode(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+
+	bounds := decoded.Bounds()
+	if bounds.Dx() != W || bounds.Dy() != H {
+		t.Errorf("decoded size = %dx%d, want %dx%d", bounds.Dx(), bounds.Dy(), W, H)
+	}
+}
+
+func TestDecodeConfigEdgeCases(t *testing.T) {
+	t.Run("1x1_lossless", func(t *testing.T) {
+		img := image.NewNRGBA(image.Rect(0, 0, 1, 1))
+		img.SetNRGBA(0, 0, color.NRGBA{R: 42, G: 84, B: 126, A: 255})
+
+		var buf bytes.Buffer
+		if err := Encode(&buf, img, &EncoderOptions{Lossless: true, Quality: 75}); err != nil {
+			t.Fatalf("Encode: %v", err)
+		}
+
+		cfg, err := DecodeConfig(bytes.NewReader(buf.Bytes()))
+		if err != nil {
+			t.Fatalf("DecodeConfig: %v", err)
+		}
+		if cfg.Width != 1 || cfg.Height != 1 {
+			t.Errorf("config = %dx%d, want 1x1", cfg.Width, cfg.Height)
+		}
+	})
+
+	t.Run("with_alpha", func(t *testing.T) {
+		img := image.NewNRGBA(image.Rect(0, 0, 4, 4))
+		for y := 0; y < 4; y++ {
+			for x := 0; x < 4; x++ {
+				img.SetNRGBA(x, y, color.NRGBA{R: 100, G: 200, B: 50, A: 128})
+			}
+		}
+
+		var buf bytes.Buffer
+		if err := Encode(&buf, img, &EncoderOptions{Lossless: true, Quality: 75}); err != nil {
+			t.Fatalf("Encode: %v", err)
+		}
+
+		cfg, err := DecodeConfig(bytes.NewReader(buf.Bytes()))
+		if err != nil {
+			t.Fatalf("DecodeConfig: %v", err)
+		}
+		if cfg.Width != 4 || cfg.Height != 4 {
+			t.Errorf("config = %dx%d, want 4x4", cfg.Width, cfg.Height)
+		}
+		if cfg.ColorModel != color.NRGBAModel {
+			t.Errorf("color model = %v, want NRGBAModel", cfg.ColorModel)
+		}
+	})
+
+	t.Run("animated", func(t *testing.T) {
+		const W, H = 8, 8
+		var buf bytes.Buffer
+		enc := animation.NewEncoder(&buf, W, H, nil)
+		for i := 0; i < 2; i++ {
+			img := image.NewNRGBA(image.Rect(0, 0, W, H))
+			enc.AddFrame(img, 50*time.Millisecond)
+		}
+		enc.Close()
+
+		cfg, err := DecodeConfig(bytes.NewReader(buf.Bytes()))
+		if err != nil {
+			t.Fatalf("DecodeConfig: %v", err)
+		}
+		if cfg.Width != W || cfg.Height != H {
+			t.Errorf("config = %dx%d, want %dx%d", cfg.Width, cfg.Height, W, H)
+		}
+	})
+}
+
+// --- Metadata round-trip tests ---
+
+func TestMetadataRoundTrip(t *testing.T) {
+	const W, H = 8, 8
+	iccData := []byte("fake ICC profile data for testing")
+	exifData := []byte("fake EXIF data for testing")
+	xmpData := []byte("fake XMP data for testing")
+
+	// Encode a 2-frame animation with ICC, EXIF, and XMP metadata.
+	// Two frames are needed because the single-frame optimization in
+	// AnimEncoder.Close() produces a simple VP8/VP8L file that strips
+	// VP8X metadata.
+	var buf bytes.Buffer
+	enc := animation.NewEncoder(&buf, W, H, nil)
+	enc.SetICCProfile(iccData)
+	enc.SetEXIF(exifData)
+	enc.SetXMP(xmpData)
+
+	for f := 0; f < 2; f++ {
+		img := image.NewNRGBA(image.Rect(0, 0, W, H))
+		for y := 0; y < H; y++ {
+			for x := 0; x < W; x++ {
+				img.SetNRGBA(x, y, color.NRGBA{R: uint8(f * 128), G: 255, A: 255})
+			}
+		}
+		if err := enc.AddFrame(img, 100*time.Millisecond); err != nil {
+			t.Fatalf("AddFrame %d: %v", f, err)
+		}
+	}
+	if err := enc.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Decode with mux.Demuxer and verify metadata.
+	data := buf.Bytes()
+	d, err := mux.NewDemuxer(data)
+	if err != nil {
+		t.Fatalf("NewDemuxer: %v", err)
+	}
+
+	feat := d.GetFeatures()
+	if !feat.HasICC {
+		t.Error("HasICC should be true")
+	}
+	if !feat.HasEXIF {
+		t.Error("HasEXIF should be true")
+	}
+	if !feat.HasXMP {
+		t.Error("HasXMP should be true")
+	}
+
+	icc, err := d.GetChunk(mux.FourCCICCP)
+	if err != nil {
+		t.Fatalf("GetChunk(ICCP): %v", err)
+	}
+	if !bytes.Equal(icc, iccData) {
+		t.Errorf("ICC = %q, want %q", icc, iccData)
+	}
+
+	exif, err := d.GetChunk(mux.FourCCEXIF)
+	if err != nil {
+		t.Fatalf("GetChunk(EXIF): %v", err)
+	}
+	if !bytes.Equal(exif, exifData) {
+		t.Errorf("EXIF = %q, want %q", exif, exifData)
+	}
+
+	xmp, err := d.GetChunk(mux.FourCCXMP)
+	if err != nil {
+		t.Fatalf("GetChunk(XMP): %v", err)
+	}
+	if !bytes.Equal(xmp, xmpData) {
+		t.Errorf("XMP = %q, want %q", xmp, xmpData)
 	}
 }

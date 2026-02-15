@@ -176,20 +176,27 @@ func estimateEntropy(argb []uint32, width, height, tx, ty, bits, mode int) float
 	count := 0
 
 	for y := yStart; y < yEnd; y++ {
+		rowOff := y * width
+		row := argb[rowOff : rowOff+width : rowOff+width]
+		var prevRow []uint32
+		if y > 0 {
+			pr := rowOff - width
+			prevRow = argb[pr : pr+width : pr+width]
+		}
 		for x := xStart; x < xEnd; x++ {
-			px := argb[y*width+x]
+			px := row[x]
 
 			var left, top, topRight, topLeft uint32
 			if x > 0 {
-				left = argb[y*width+x-1]
+				left = row[x-1]
 			}
 			if y > 0 {
-				top = argb[(y-1)*width+x]
+				top = prevRow[x]
 				if x > 0 {
-					topLeft = argb[(y-1)*width+x-1]
+					topLeft = prevRow[x-1]
 				}
 				if x < width-1 {
-					topRight = argb[(y-1)*width+x+1]
+					topRight = prevRow[x+1]
 				} else {
 					topRight = top
 				}
