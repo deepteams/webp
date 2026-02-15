@@ -39,15 +39,15 @@ var (
 	ErrNoFrames    = errors.New("webp: no image frames found")
 )
 
-// Features describes a WebP file's properties.
+// Features describes a WebP file's properties, as returned by [GetFeatures].
 type Features struct {
-	Width        int
-	Height       int
-	HasAlpha     bool
-	HasAnimation bool
-	Format       string // "lossy", "lossless", "extended"
-	LoopCount    int    // animation loop count (0 = infinite)
-	FrameCount   int    // number of frames (1 for still images)
+	Width        int    // Image width in pixels.
+	Height       int    // Image height in pixels.
+	HasAlpha     bool   // True if the image contains an alpha channel.
+	HasAnimation bool   // True if the image is animated (ANIM chunk present).
+	Format       string // Container format: "lossy" (VP8), "lossless" (VP8L), or "extended" (VP8X).
+	LoopCount    int    // Animation loop count (0 = infinite). Only meaningful when HasAnimation is true.
+	FrameCount   int    // Number of frames (1 for still images).
 }
 
 // readAll reads all data from r. If r implements Len() int (e.g.
@@ -102,7 +102,9 @@ func DecodeConfig(r io.Reader) (image.Config, error) {
 	}, nil
 }
 
-// GetFeatures reads WebP features without decoding pixel data.
+// GetFeatures reads WebP features (dimensions, format, alpha, animation)
+// without decoding pixel data. It parses just the RIFF container and chunk
+// headers, making it much cheaper than a full [Decode].
 func GetFeatures(r io.Reader) (*Features, error) {
 	data, err := readAll(r)
 	if err != nil {

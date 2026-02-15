@@ -2,8 +2,8 @@
 //
 // Usage:
 //
-//	gwebp enc [options] <input>        PNG/JPEG/GIF → WebP
-//	gwebp dec [options] <input.webp>   WebP → PNG or GIF
+//	gwebp enc [options] <input>        PNG/JPEG/GIF → WebP (use "-" for stdin)
+//	gwebp dec [options] <input.webp>   WebP → PNG/JPEG/GIF (use "-" for stdin, -o - for stdout)
 //	gwebp info <input.webp>            Display WebP metadata
 package main
 
@@ -14,8 +14,10 @@ import (
 	"image/color/palette"
 	"image/draw"
 	"image/gif"
-	_ "image/jpeg"
+	"bytes"
+	"image/jpeg"
 	"image/png"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,11 +59,21 @@ func main() {
 func printUsage() {
 	fmt.Fprintf(os.Stderr, `Usage:
   gwebp enc [options] <input>        Encode PNG/JPEG/GIF to WebP
-  gwebp dec [options] <input.webp>   Decode WebP to PNG or GIF
-  gwebp info <input.webp>            Display WebP metadata
+  gwebp dec [options] <input.webp>   Decode WebP to PNG, JPEG, or GIF
+
+Use "-" as input to read from stdin, "-o -" to write to stdout.
 
 Run "gwebp <command> -h" for command-specific options.
 `)
+}
+
+// openInput returns an io.ReadCloser for the given path.
+// If path is "-", stdin is returned (caller should not close).
+func openInput(path string) (io.ReadCloser, error) {
+	if path == "-" {
+		return io.NopCloser(os.Stdin), nil
+	}
+	return os.Open(path)
 }
 
 // --- enc ---
@@ -86,10 +98,10 @@ func runEnc(args []string) error {
 	alphaQ := fs.Int("alpha_q", -1, "alpha quality 0-100 (-1=default)")
 	alphaMethod := fs.Int("alpha_method", -1, "alpha compression 0-1 (-1=default)")
 	alphaFilter := fs.String("alpha_filter", "", "alpha filter: none/fast/best")
-	pre := fs.Int("pre", 0, "pre-processing filter 0-2")
+	pre := fs.Int("pre", 0, "pre-processing filter 0-3")
 	qmin := fs.Int("qmin", 0, "minimum quality 0-100")
 	qmax := fs.Int("qmax", -1, "maximum quality 0-100 (-1=default)")
-	output := fs.String("o", "", "output path (default: <input>.webp)")
+	output := fs.String("o", "", `output path (default: <input>.webp, "-" for stdout)`)
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -161,7 +173,7 @@ func runEnc(args []string) error {
 	}
 
 	ext := strings.ToLower(filepath.Ext(inputPath))
-	if ext == ".gif" {
+	if ext == ".gif" && inputPath != "-" {
 		return encodeGIF(inputPath, *output, opts)
 	}
 	return encodeStatic(inputPath, *output, opts)
@@ -187,20 +199,28 @@ func parsePreset(s string) (webp.Preset, error) {
 }
 
 func encodeStatic(inputPath, outputPath string, opts *webp.EncoderOptions) error {
-	f, err := os.Open(inputPath)
+	in, err := openInput(inputPath)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer in.Close()
 
-	img, _, err := image.Decode(f)
+	img, _, err := image.Decode(in)
 	if err != nil {
 		return fmt.Errorf("enc: decoding input: %w", err)
 	}
 
+	if outputPath == "-" {
+		return webp.Encode(os.Stdout, img, opts)
+	}
+
 	if outputPath == "" {
-		base := strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))
-		outputPath = base + ".webp"
+		if inputPath == "-" {
+			outputPath = "output.webp"
+		} else {
+			base := strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))
+			outputPath = base + ".webp"
+		}
 	}
 
 	out, err := os.Create(outputPath)
@@ -239,6 +259,10 @@ func encodeGIF(inputPath, outputPath string, opts *webp.EncoderOptions) error {
 		return fmt.Errorf("enc: GIF has no frames")
 	}
 
+	if outputPath == "-" {
+		return encodeGIFFrames(os.Stdout, g, opts)
+	}
+
 	if outputPath == "" {
 		base := strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))
 		outputPath = base + ".webp"
@@ -249,6 +273,22 @@ func encodeGIF(inputPath, outputPath string, opts *webp.EncoderOptions) error {
 		return err
 	}
 
+	if err := encodeGIFFrames(out, g, opts); err != nil {
+		out.Close()
+		os.Remove(outputPath)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(outputPath)
+		return err
+	}
+
+	fi, _ := os.Stat(outputPath)
+	fmt.Fprintf(os.Stderr, "Encoded %s → %s (%d frames, %d bytes)\n", inputPath, outputPath, len(g.Image), fi.Size())
+	return nil
+}
+
+func encodeGIFFrames(w io.Writer, g *gif.GIF, opts *webp.EncoderOptions) error {
 	canvasW := g.Config.Width
 	canvasH := g.Config.Height
 	if canvasW == 0 || canvasH == 0 {
@@ -256,7 +296,7 @@ func encodeGIF(inputPath, outputPath string, opts *webp.EncoderOptions) error {
 		canvasH = g.Image[0].Bounds().Dy()
 	}
 
-	enc := animation.NewEncoder(out, canvasW, canvasH, &animation.EncodeOptions{
+	enc := animation.NewEncoder(w, canvasW, canvasH, &animation.EncodeOptions{
 		LoopCount: g.LoopCount,
 		Lossless:  opts.Lossless,
 		Quality:   int(opts.Quality),
@@ -291,8 +331,6 @@ func encodeGIF(inputPath, outputPath string, opts *webp.EncoderOptions) error {
 		}
 
 		if err := enc.AddFrame(snap, delay); err != nil {
-			out.Close()
-			os.Remove(outputPath)
 			return fmt.Errorf("enc: frame %d: %w", i, err)
 		}
 
@@ -305,26 +343,15 @@ func encodeGIF(inputPath, outputPath string, opts *webp.EncoderOptions) error {
 		}
 	}
 
-	if err := enc.Close(); err != nil {
-		out.Close()
-		os.Remove(outputPath)
-		return fmt.Errorf("enc: finalizing: %w", err)
-	}
-	if err := out.Close(); err != nil {
-		os.Remove(outputPath)
-		return err
-	}
-
-	fi, _ := os.Stat(outputPath)
-	fmt.Fprintf(os.Stderr, "Encoded %s → %s (%d frames, %d bytes)\n", inputPath, outputPath, len(g.Image), fi.Size())
-	return nil
+	return enc.Close()
 }
 
 // --- dec ---
 
 func runDec(args []string) error {
 	fs := flag.NewFlagSet("dec", flag.ContinueOnError)
-	output := fs.String("o", "", "output path (default: .png or .gif)")
+	output := fs.String("o", "", `output path (default: .png or .gif, "-" for stdout)`)
+	fmtFlag := fs.String("fmt", "", "output format: png, jpeg (auto-detect from extension if omitted)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -334,39 +361,68 @@ func runDec(args []string) error {
 	}
 	inputPath := fs.Arg(0)
 
-	f, err := os.Open(inputPath)
+	in, err := openInput(inputPath)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 
-	feat, err := webp.GetFeatures(f)
+	data, err := io.ReadAll(in)
+	in.Close()
+	if err != nil {
+		return fmt.Errorf("dec: reading input: %w", err)
+	}
+
+	feat, err := webp.GetFeatures(bytes.NewReader(data))
 	if err != nil {
 		return fmt.Errorf("dec: %w", err)
 	}
-	f.Close()
 
 	if feat.HasAnimation {
-		return decodeAnimated(inputPath, *output, feat)
+		return decodeAnimated(data, inputPath, *output, feat)
 	}
-	return decodeStatic(inputPath, *output)
+	return decodeStatic(data, inputPath, *output, *fmtFlag)
 }
 
-func decodeStatic(inputPath, outputPath string) error {
-	f, err := os.Open(inputPath)
-	if err != nil {
-		return err
+// detectOutputFormat returns "png", "jpeg", or "gif" based on flag/extension.
+func detectOutputFormat(fmtFlag, outputPath string) string {
+	if fmtFlag != "" {
+		return strings.ToLower(fmtFlag)
 	}
-	defer f.Close()
+	if outputPath != "" && outputPath != "-" {
+		switch strings.ToLower(filepath.Ext(outputPath)) {
+		case ".jpg", ".jpeg":
+			return "jpeg"
+		case ".gif":
+			return "gif"
+		}
+	}
+	return "png"
+}
 
-	img, err := webp.Decode(f)
+func decodeStatic(data []byte, inputPath, outputPath, fmtFlag string) error {
+	img, err := webp.Decode(bytes.NewReader(data))
 	if err != nil {
 		return fmt.Errorf("dec: %w", err)
+	}
+
+	outFmt := detectOutputFormat(fmtFlag, outputPath)
+
+	// Determine output writer.
+	if outputPath == "-" {
+		return encodeImage(os.Stdout, img, outFmt)
 	}
 
 	if outputPath == "" {
-		base := strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))
-		outputPath = base + ".png"
+		ext := ".png"
+		if outFmt == "jpeg" {
+			ext = ".jpg"
+		}
+		if inputPath == "-" {
+			outputPath = "output" + ext
+		} else {
+			base := strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))
+			outputPath = base + ext
+		}
 	}
 
 	out, err := os.Create(outputPath)
@@ -374,7 +430,7 @@ func decodeStatic(inputPath, outputPath string) error {
 		return err
 	}
 
-	if err := png.Encode(out, img); err != nil {
+	if err := encodeImage(out, img, outFmt); err != nil {
 		out.Close()
 		os.Remove(outputPath)
 		return fmt.Errorf("dec: %w", err)
@@ -388,12 +444,17 @@ func decodeStatic(inputPath, outputPath string) error {
 	return nil
 }
 
-func decodeAnimated(inputPath, outputPath string, feat *webp.Features) error {
-	data, err := os.ReadFile(inputPath)
-	if err != nil {
-		return err
+// encodeImage writes img in the specified format to w.
+func encodeImage(w io.Writer, img image.Image, format string) error {
+	switch format {
+	case "jpeg", "jpg":
+		return jpeg.Encode(w, img, &jpeg.Options{Quality: 90})
+	default:
+		return png.Encode(w, img)
 	}
+}
 
+func decodeAnimated(data []byte, inputPath, outputPath string, feat *webp.Features) error {
 	anim, err := animation.DecodeBytes(data)
 	if err != nil {
 		return fmt.Errorf("dec: %w", err)
@@ -428,9 +489,17 @@ func decodeAnimated(inputPath, outputPath string, feat *webp.Features) error {
 		g.Delay = append(g.Delay, delay)
 	}
 
+	if outputPath == "-" {
+		return gif.EncodeAll(os.Stdout, g)
+	}
+
 	if outputPath == "" {
-		base := strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))
-		outputPath = base + ".gif"
+		if inputPath == "-" {
+			outputPath = "output.gif"
+		} else {
+			base := strings.TrimSuffix(filepath.Base(inputPath), filepath.Ext(inputPath))
+			outputPath = base + ".gif"
+		}
 	}
 
 	out, err := os.Create(outputPath)
@@ -505,18 +574,23 @@ func runInfo(args []string) error {
 	}
 	inputPath := args[0]
 
-	f, err := os.Open(inputPath)
+	in, err := openInput(inputPath)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer in.Close()
 
-	feat, err := webp.GetFeatures(f)
+	feat, err := webp.GetFeatures(in)
 	if err != nil {
 		return fmt.Errorf("info: %w", err)
 	}
 
-	fmt.Printf("File:       %s\n", inputPath)
+	name := inputPath
+	if inputPath == "-" {
+		name = "<stdin>"
+	}
+
+	fmt.Printf("File:       %s\n", name)
 	fmt.Printf("Format:     %s\n", feat.Format)
 	fmt.Printf("Dimensions: %d x %d\n", feat.Width, feat.Height)
 	fmt.Printf("Alpha:      %v\n", feat.HasAlpha)
@@ -530,9 +604,11 @@ func runInfo(args []string) error {
 		fmt.Printf("Loop count: %s\n", loop)
 	}
 
-	fi, err := os.Stat(inputPath)
-	if err == nil {
-		fmt.Printf("File size:  %d bytes\n", fi.Size())
+	if inputPath != "-" {
+		fi, err := os.Stat(inputPath)
+		if err == nil {
+			fmt.Printf("File size:  %d bytes\n", fi.Size())
+		}
 	}
 
 	return nil

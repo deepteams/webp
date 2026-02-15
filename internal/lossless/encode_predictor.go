@@ -172,8 +172,9 @@ func estimateEntropy(argb []uint32, width, height, tx, ty, bits, mode int) float
 	}
 
 	// 4 histograms of 256 bins each: [0]=alpha, [1]=red, [2]=green, [3]=blue
-	var histogram [4 * 256]int
-	count := 0
+	// Using uint32 reduces stack from 8KB to 4KB and improves cache utilisation.
+	var histogram [4 * 256]uint32
+	count := uint32(0)
 
 	for y := yStart; y < yEnd; y++ {
 		rowOff := y * width
@@ -207,10 +208,10 @@ func estimateEntropy(argb []uint32, width, height, tx, ty, bits, mode int) float
 			residual := subPixels(px, pred)
 
 			// Accumulate all 4 channels into their respective histograms.
-			histogram[0*256+int((residual>>24)&0xff)]++ // alpha
-			histogram[1*256+int((residual>>16)&0xff)]++ // red
-			histogram[2*256+int((residual>>8)&0xff)]++  // green
-			histogram[3*256+int(residual&0xff)]++       // blue
+			histogram[0*256+int((residual>>24)&0xff)]++
+			histogram[1*256+int((residual>>16)&0xff)]++
+			histogram[2*256+int((residual>>8)&0xff)]++
+			histogram[3*256+int(residual&0xff)]++
 			count++
 		}
 	}
@@ -223,13 +224,12 @@ func estimateEntropy(argb []uint32, width, height, tx, ty, bits, mode int) float
 	// Uses fastSLog2(n) = n*log2(n) identity:
 	//   H*count = sum_ch(fastSLog2(count) - sum_bins(fastSLog2(h_i)))
 	entropy := 0.0
-	countU := uint32(count)
 	for ch := 0; ch < 4; ch++ {
-		channelEntropy := fastSLog2(countU)
+		channelEntropy := fastSLog2(count)
 		base := ch * 256
 		for i := 0; i < 256; i++ {
 			if histogram[base+i] > 0 {
-				channelEntropy -= fastSLog2(uint32(histogram[base+i]))
+				channelEntropy -= fastSLog2(histogram[base+i])
 			}
 		}
 		entropy += channelEntropy

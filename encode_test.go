@@ -1801,3 +1801,176 @@ func TestLossyRoundtrip_SolidColors(t *testing.T) {
 		})
 	}
 }
+
+// --- CMYK color model roundtrip ---
+
+func TestEncode_CMYK_Roundtrip(t *testing.T) {
+	// CMYK images exercise the generic color.NRGBAModel.Convert path
+	// in encode.go's lossless and lossy encoders.
+	cmykImg := image.NewCMYK(image.Rect(0, 0, 16, 16))
+	for y := 0; y < 16; y++ {
+		for x := 0; x < 16; x++ {
+			cmykImg.SetCMYK(x, y, color.CMYK{C: 0, M: 255, Y: 255, K: 0})
+		}
+	}
+
+	t.Run("lossless", func(t *testing.T) {
+		var buf bytes.Buffer
+		err := Encode(&buf, cmykImg, &EncoderOptions{Lossless: true, Quality: 75})
+		if err != nil {
+			t.Fatalf("Encode lossless: %v", err)
+		}
+		decoded, err := Decode(bytes.NewReader(buf.Bytes()))
+		if err != nil {
+			t.Fatalf("Decode: %v", err)
+		}
+		if decoded.Bounds().Dx() != 16 || decoded.Bounds().Dy() != 16 {
+			t.Fatalf("decoded size = %dx%d, want 16x16", decoded.Bounds().Dx(), decoded.Bounds().Dy())
+		}
+		// CMYK(0,255,255,0) -> NRGBA should be approximately red.
+		r, g, b, a := decoded.At(8, 8).RGBA()
+		r8, g8, b8, a8 := uint8(r>>8), uint8(g>>8), uint8(b>>8), uint8(a>>8)
+		if r8 < 200 || g8 > 10 || b8 > 10 || a8 != 255 {
+			t.Errorf("pixel(8,8) = (%d,%d,%d,%d), want approximately (255,0,0,255)", r8, g8, b8, a8)
+		}
+	})
+
+	t.Run("lossy", func(t *testing.T) {
+		var buf bytes.Buffer
+		err := Encode(&buf, cmykImg, &EncoderOptions{Quality: 75})
+		if err != nil {
+			t.Fatalf("Encode lossy: %v", err)
+		}
+		decoded, err := Decode(bytes.NewReader(buf.Bytes()))
+		if err != nil {
+			t.Fatalf("Decode: %v", err)
+		}
+		if decoded.Bounds().Dx() != 16 || decoded.Bounds().Dy() != 16 {
+			t.Fatalf("decoded size = %dx%d, want 16x16", decoded.Bounds().Dx(), decoded.Bounds().Dy())
+		}
+	})
+}
+
+// --- RGBA alpha edge cases (de-premultiplication rounding) ---
+
+func TestEncode_RGBA_AlphaEdgeCases(t *testing.T) {
+	tests := []struct {
+		name string
+		c    color.RGBA
+	}{
+		{"alpha=1", color.RGBA{R: 1, G: 0, B: 0, A: 1}},
+		{"alpha=127", color.RGBA{R: 64, G: 32, B: 16, A: 127}},
+		{"transparent", color.RGBA{R: 0, G: 0, B: 0, A: 0}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name+"_lossless", func(t *testing.T) {
+			img := image.NewRGBA(image.Rect(0, 0, 4, 4))
+			for y := 0; y < 4; y++ {
+				for x := 0; x < 4; x++ {
+					img.SetRGBA(x, y, tc.c)
+				}
+			}
+			var buf bytes.Buffer
+			err := Encode(&buf, img, &EncoderOptions{Lossless: true, Quality: 75})
+			if err != nil {
+				t.Fatalf("Encode: %v", err)
+			}
+			_, err = Decode(bytes.NewReader(buf.Bytes()))
+			if err != nil {
+				t.Fatalf("Decode: %v", err)
+			}
+		})
+
+		t.Run(tc.name+"_lossy", func(t *testing.T) {
+			img := image.NewRGBA(image.Rect(0, 0, 16, 16))
+			for y := 0; y < 16; y++ {
+				for x := 0; x < 16; x++ {
+					img.SetRGBA(x, y, tc.c)
+				}
+			}
+			var buf bytes.Buffer
+			err := Encode(&buf, img, &EncoderOptions{Quality: 75})
+			if err != nil {
+				t.Fatalf("Encode: %v", err)
+			}
+			_, err = Decode(bytes.NewReader(buf.Bytes()))
+			if err != nil {
+				t.Fatalf("Decode: %v", err)
+			}
+		})
+	}
+}
+
+// --- Exact=true with lossy encoding ---
+
+func TestEncodeLossy_Exact_Roundtrip(t *testing.T) {
+	// Encode a semi-transparent image with Exact=true in lossy mode.
+	// VP8 quantization still modifies pixels, but no error should occur.
+	img := solidImage(16, 16, color.NRGBA{R: 200, G: 100, B: 50, A: 128})
+	var buf bytes.Buffer
+	err := Encode(&buf, img, &EncoderOptions{
+		Quality: 80,
+		Exact:   true,
+	})
+	if err != nil {
+		t.Fatalf("Encode with Exact=true lossy: %v", err)
+	}
+	decoded, err := Decode(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if decoded.Bounds().Dx() != 16 || decoded.Bounds().Dy() != 16 {
+		t.Fatalf("decoded size = %dx%d, want 16x16", decoded.Bounds().Dx(), decoded.Bounds().Dy())
+	}
+}
+
+// --- TargetPSNR + TargetSize simultaneous ---
+
+func TestEncodeLossy_TargetPSNR_And_TargetSize(t *testing.T) {
+	// Both TargetPSNR and TargetSize set: no panic, valid output.
+	img := gradientTestImage(32, 32)
+	var buf bytes.Buffer
+	err := Encode(&buf, img, &EncoderOptions{
+		Quality:    75,
+		Method:     4,
+		TargetPSNR: 35.0,
+		TargetSize: 5000,
+		Pass:       3,
+	})
+	if err != nil {
+		t.Fatalf("Encode with TargetPSNR+TargetSize: %v", err)
+	}
+	decoded, err := Decode(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if decoded.Bounds().Dx() != 32 || decoded.Bounds().Dy() != 32 {
+		t.Fatalf("decoded size = %dx%d, want 32x32", decoded.Bounds().Dx(), decoded.Bounds().Dy())
+	}
+}
+
+// --- Preprocessing=1 (smooth segment map) ---
+
+func TestEncodeLossy_Preprocessing1_SmoothSegmentMap(t *testing.T) {
+	// Encode a gradient image with Preprocessing=1 (segment smoothing)
+	// and Segments=4, verifying roundtrip is valid.
+	img := gradientTestImage(64, 64)
+	var buf bytes.Buffer
+	err := Encode(&buf, img, &EncoderOptions{
+		Quality:       75,
+		Method:        4,
+		Preprocessing: 1,
+		Segments:      4,
+	})
+	if err != nil {
+		t.Fatalf("Encode with Preprocessing=1: %v", err)
+	}
+	decoded, err := Decode(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if decoded.Bounds().Dx() != 64 || decoded.Bounds().Dy() != 64 {
+		t.Fatalf("decoded size = %dx%d, want 64x64", decoded.Bounds().Dx(), decoded.Bounds().Dy())
+	}
+}

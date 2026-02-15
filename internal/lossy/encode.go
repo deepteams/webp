@@ -56,6 +56,7 @@ type EncodeConfig struct {
 	Partitions int  // 0-3 => 1, 2, 4, 8 partitions.
 	Segments   int  // 1-4, number of segments.
 	Pass       int  // 1-10, multi-pass encoding.
+	Preprocessing int  // Bitmask: bit 0 = segment smooth, bit 1 = dithering.
 	Dithering  float32 // Dithering amplitude [0..1] for RGB->YUV conversion.
 	QMin       int  // 0-100, minimum quantizer value. Matches C libwebp's qmin.
 	QMax       int  // 0-100, maximum quantizer value. Matches C libwebp's qmax. -1 = use default (100).

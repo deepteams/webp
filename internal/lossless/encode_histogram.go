@@ -3,6 +3,7 @@ package lossless
 import (
 	"math"
 	"runtime"
+	"sort"
 	"sync"
 )
 
@@ -643,39 +644,6 @@ func HistogramAdd(dst, src *Histogram) {
 	histogramAdd(dst, src, dst)
 }
 
-// HistogramAddEval computes the combined cost of merging a and b
-// without modifying either.
-func HistogramAddEval(a, b *Histogram) float64 {
-	tmp := mergedHistogram(a, b)
-	return PopulationCost(tmp)
-}
-
-// mergedHistogram creates a new histogram that is the element-wise sum of a and b.
-func mergedHistogram(a, b *Histogram) *Histogram {
-	litSize := len(a.Literal)
-	if len(b.Literal) > litSize {
-		litSize = len(b.Literal)
-	}
-	h := &Histogram{
-		Literal: make([]uint32, litSize),
-	}
-	for i := 0; i < len(a.Literal); i++ {
-		h.Literal[i] += a.Literal[i]
-	}
-	for i := 0; i < len(b.Literal); i++ {
-		h.Literal[i] += b.Literal[i]
-	}
-	for i := 0; i < NumLiteralCodes; i++ {
-		h.Red[i] = a.Red[i] + b.Red[i]
-		h.Blue[i] = a.Blue[i] + b.Blue[i]
-		h.Alpha[i] = a.Alpha[i] + b.Alpha[i]
-	}
-	for i := 0; i < NumDistanceCodes; i++ {
-		h.Distance[i] = a.Distance[i] + b.Distance[i]
-	}
-	return h
-}
-
 // getCombinedHistogramEntropy computes the combined cost of merging a and b.
 // Returns (cost, costs, true) if cost < costThreshold; else (0, _, false).
 func getCombinedHistogramEntropy(a, b *Histogram, costThreshold float64) (float64, [5]float64, bool) {
@@ -897,6 +865,14 @@ func getCombineCostFactor(histoSize, quality int) float64 {
 func histogramCombineEntropyBin(imageHisto *HistoSet, numBins int,
 	combineCostFactor float64, lowEffort bool) {
 
+	// Pre-sort histograms by binID for better cache locality and branch
+	// prediction during the combining loop. Histograms with the same bin
+	// end up adjacent, reducing cache misses on the first/idx lookups.
+	histograms := imageHisto.histos
+	sort.Slice(histograms, func(i, j int) bool {
+		return histograms[i].binID < histograms[j].binID
+	})
+
 	type binInfo struct {
 		first              int
 		numCombineFailures int
@@ -911,7 +887,6 @@ func histogramCombineEntropyBin(imageHisto *HistoSet, numBins int,
 		imageHisto.curCombo = NewHistogram(imageHisto.cacheBits)
 	}
 	curCombo := imageHisto.curCombo
-	histograms := imageHisto.histos
 
 	idx := 0
 	for idx < len(histograms) {

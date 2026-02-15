@@ -42,7 +42,11 @@ type EncoderOptions struct {
 	// For lossless: controls the compression effort.
 	Quality float32
 
-	// Method controls encoding effort (0-6, default 4). Higher is slower but better.
+	// Method controls encoding effort (0-6, default 4). Higher values
+	// produce smaller files at the cost of longer encoding times:
+	//   0 = fastest, least compression
+	//   4 = good trade-off between speed and quality (default)
+	//   6 = slowest, best compression
 	Method int
 
 	// Preset selects encoding parameters tuned for specific content types.
@@ -51,7 +55,11 @@ type EncoderOptions struct {
 	// UseSharpYUV enables sharp (and slow) RGB->YUV conversion.
 	UseSharpYUV bool
 
-	// Exact preserves the RGB values under transparent area (lossless only).
+	// Exact preserves the RGB values under transparent areas. In lossless
+	// mode, transparent pixels' RGB are kept as-is instead of being zeroed.
+	// In lossy mode, it skips the transparent-area cleanup that normally
+	// flattens invisible pixels to reduce encoding cost. Note that lossy
+	// VP8 quantization will still modify pixel values regardless of this flag.
 	Exact bool
 
 	// TargetSize sets a target output size in bytes (0 = use quality instead).
@@ -63,13 +71,15 @@ type EncoderOptions struct {
 	// Matches C libwebp's WebPConfig::target_PSNR.
 	TargetPSNR float32
 
-	// Preprocessing selects preprocessing applied before RGB->YUV conversion
+	// Preprocessing selects preprocessing applied before/during encoding
 	// (lossy encoding only). This is a bitmask matching C libwebp's
 	// WebPConfig::preprocessing field:
 	//   0 = none
-	//   1 = segment smooth (not implemented; rarely used even in C libwebp)
+	//   1 = segment smooth (applies a 3x3 majority-vote filter to the
+	//       segment map, reducing noise in segment assignment)
 	//   2 = pseudo-random dithering on RGB->YUV conversion
-	// When bit 2 is set, ordered dithering noise is added to the rounding
+	//   3 = both segment smooth and dithering
+	// When bit 1 is set, ordered dithering noise is added to the rounding
 	// values during the RGB->YUV color space conversion. The amplitude
 	// decreases with quality: max dithering at q=0, 0.5 amplitude at q=100.
 	// This reduces banding artifacts at lower quality levels.
@@ -117,9 +127,10 @@ type EncoderOptions struct {
 	Pass int
 
 	// EmulateJpegSize, when true, tries to produce an output of similar
-	// size to a JPEG file of equivalent quality. This is a best-effort
-	// heuristic. Matches C libwebp's WebPConfig::emulate_jpeg_size.
-	// Note: not implemented; the field is accepted but has no effect.
+	// size to a JPEG file of equivalent quality. This is a C libwebp
+	// compatibility field (WebPConfig::emulate_jpeg_size). The pure Go
+	// encoder does not implement this heuristic; the field is accepted
+	// for API compatibility but has no effect on output.
 	EmulateJpegSize bool
 
 	// QMin sets the minimum quantizer value (0-100, default 0).
@@ -445,6 +456,8 @@ func encodeLossyWithAlpha(img image.Image, opts *EncoderOptions) ([]byte, []byte
 	if opts.Pass > 0 {
 		cfg.Pass = opts.Pass
 	}
+
+	cfg.Preprocessing = opts.Preprocessing
 
 	// Compute dithering amplitude when preprocessing bit 2 is set.
 	// Matches C libwebp webp_enc.c:364-369:

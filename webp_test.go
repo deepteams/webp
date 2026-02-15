@@ -214,6 +214,71 @@ func TestImageDecodeConfigFormat(t *testing.T) {
 	}
 }
 
+// --- image.RegisterFormat integration (lossy) ---
+
+func TestImageDecodeFormat_Lossy(t *testing.T) {
+	data := readTestFile(t, "red_4x4_lossy.webp")
+	img, format, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if format != "webp" {
+		t.Errorf("format = %q, want %q", format, "webp")
+	}
+	bounds := img.Bounds()
+	if bounds.Dx() != 4 || bounds.Dy() != 4 {
+		t.Errorf("dimensions = %dx%d, want 4x4", bounds.Dx(), bounds.Dy())
+	}
+}
+
+func TestImageDecode_ViaOsOpen(t *testing.T) {
+	// Test with os.Open (not just bytes.Reader) to exercise the io.Reader path.
+	f, err := os.Open(testdataPath("red_4x4_lossless.webp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	img, format, err := image.Decode(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if format != "webp" {
+		t.Errorf("format = %q, want %q", format, "webp")
+	}
+	bounds := img.Bounds()
+	if bounds.Dx() != 4 || bounds.Dy() != 4 {
+		t.Errorf("dimensions = %dx%d, want 4x4", bounds.Dx(), bounds.Dy())
+	}
+}
+
+// --- DecodeConfig color model for lossy+alpha ---
+
+func TestDecodeConfig_ColorModel_LossyWithAlpha(t *testing.T) {
+	// Encode a semi-transparent lossy image (produces VP8X+ALPH).
+	img := image.NewNRGBA(image.Rect(0, 0, 16, 16))
+	for y := 0; y < 16; y++ {
+		for x := 0; x < 16; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{R: 200, G: 100, B: 50, A: 128})
+		}
+	}
+	var buf bytes.Buffer
+	if err := Encode(&buf, img, &EncoderOptions{Quality: 80}); err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+
+	cfg, err := DecodeConfig(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("DecodeConfig: %v", err)
+	}
+	if cfg.ColorModel != color.NRGBAModel {
+		t.Errorf("color model = %v, want NRGBAModel for lossy+alpha", cfg.ColorModel)
+	}
+	if cfg.Width != 16 || cfg.Height != 16 {
+		t.Errorf("dimensions = %dx%d, want 16x16", cfg.Width, cfg.Height)
+	}
+}
+
 // --- Error cases ---
 
 func TestDecode_InvalidData(t *testing.T) {

@@ -817,9 +817,9 @@ func assignSegments(enc *VP8Encoder, alphas []int, numSegs int) {
 		enc.mbInfo[i].Alpha = centers[alphaMap[a]]
 	}
 
-	// Apply smooth segment map if preprocessing enabled.
-	if enc.config.Segments > 1 {
-		// TODO: call smoothSegmentMap if preprocessing & 1 is set
+	// Apply smooth segment map if preprocessing bit 0 is set.
+	if enc.config.Segments > 1 && enc.config.Preprocessing&1 != 0 {
+		smoothSegmentMap(enc)
 	}
 
 	// Set segment alphas (matching C SetSegmentAlphas).
