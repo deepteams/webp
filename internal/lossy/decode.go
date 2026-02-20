@@ -542,7 +542,7 @@ func (dec *Decoder) parseFrame() error {
 
 		// Apply filtering.
 		if dec.filterType > 0 {
-			dec.filterRow()
+			dec.filterRowAt(dec.mbY)
 		}
 	}
 	return nil

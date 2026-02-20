@@ -51,14 +51,18 @@ var kVP8NewRange = [128]uint8{
 // fastBit decodes one boolean symbol using LUT-based normalization (GetBitAlt).
 // When brR > 0x7e (~50% of calls), normalization is skipped entirely.
 // Designed to be inlined by the Go compiler.
+//
+// The &63 masks on shift counts are a no-op (brB is always in [0, 56]) but
+// they tell the Go compiler the shift is < 64, eliminating CMP+CSEL guard
+// instructions on ARM64 (saves 4 instructions per call).
 func fastBit(prob uint8, brV uint64, brR uint32, brB int) (int, uint64, uint32, int) {
 	split := (brR * uint32(prob)) >> 8
-	val := uint32(brV >> uint(brB))
+	val := uint32(brV >> (uint(brB) & 63))
 	var bit int
 	if val > split {
 		bit = 1
 		brR -= split + 1
-		brV -= uint64(split+1) << uint(brB)
+		brV -= uint64(split+1) << (uint(brB) & 63)
 	} else {
 		brR = split
 	}
@@ -74,11 +78,11 @@ func fastBit(prob uint8, brV uint64, brR uint32, brB int) (int, uint64, uint32, 
 func fastSigned(v int, brV uint64, brR uint32, brB int) (int, uint64, uint32, int) {
 	pos := brB
 	split := brR >> 1
-	val := uint32(brV >> uint(pos))
+	val := uint32(brV >> (uint(pos) & 63))
 	mask := int32(split-val) >> 31
 	brB--
 	brR = (brR + uint32(mask)) | 1
-	brV -= uint64((split + 1) & uint32(mask)) << uint(pos)
+	brV -= uint64((split + 1) & uint32(mask)) << (uint(pos) & 63)
 	return (v ^ int(mask)) - int(mask), brV, brR, brB
 }
 
@@ -110,6 +114,9 @@ func getCoeffsInline(br *bitio.BoolReader, bands *[17]*BandProbas, ctx int, dq0,
 	brR := br.Range
 	brB := br.Bits
 
+	// BCE hints: n ranges [0,15], n+1 ranges [1,16]; out indices are KZigzag values [0,15].
+	_ = bands[16]
+	_ = out[15]
 	p := bands[n].Probas[ctx][:]
 	for ; n < 16; n++ {
 		// Inline: if br.GetBit(p[0]) == 0 { return n }

@@ -193,17 +193,25 @@ func (dec *Decoder) reconstructRow() {
 		}
 
 		// Transfer reconstructed samples to the output cache.
-		yOffset := mbY * 16 * dec.cacheYStride
-		uvOffset := mbY * 8 * dec.cacheUVStride
+		yStride := dec.cacheYStride
+		uvStride := dec.cacheUVStride
+		yOffset := mbY * 16 * yStride
+		uvOffset := mbY * 8 * uvStride
 		yOut := dec.cacheY[mbX*16+yOffset:]
 		uOut := dec.cacheU[mbX*8+uvOffset:]
 		vOut := dec.cacheV[mbX*8+uvOffset:]
+		_ = yOut[15*yStride+15]  // BCE hint
+		_ = yDst[15*bps+15]     // BCE hint
+		_ = uOut[7*uvStride+7]  // BCE hint
+		_ = vOut[7*uvStride+7]  // BCE hint
+		_ = uDst[7*bps+7]      // BCE hint
+		_ = vDst[7*bps+7]      // BCE hint
 		for j := 0; j < 16; j++ {
-			copy(yOut[j*dec.cacheYStride:j*dec.cacheYStride+16], yDst[j*bps:j*bps+16])
+			copy(yOut[j*yStride:j*yStride+16], yDst[j*bps:j*bps+16])
 		}
 		for j := 0; j < 8; j++ {
-			copy(uOut[j*dec.cacheUVStride:j*dec.cacheUVStride+8], uDst[j*bps:j*bps+8])
-			copy(vOut[j*dec.cacheUVStride:j*dec.cacheUVStride+8], vDst[j*bps:j*bps+8])
+			copy(uOut[j*uvStride:j*uvStride+8], uDst[j*bps:j*bps+8])
+			copy(vOut[j*uvStride:j*uvStride+8], vDst[j*bps:j*bps+8])
 		}
 	}
 }
@@ -271,10 +279,10 @@ func (dec *Decoder) precomputeFilterStrengths() {
 	}
 }
 
-// filterRow applies the loop filter to the current macroblock row.
-func (dec *Decoder) filterRow() {
+// filterRowAt applies the loop filter to the given macroblock row.
+func (dec *Decoder) filterRowAt(mbY int) {
 	for mbX := dec.tlMBX; mbX < dec.brMBX; mbX++ {
-		dec.doFilter(mbX, dec.mbY)
+		dec.doFilter(mbX, mbY)
 	}
 }
 
