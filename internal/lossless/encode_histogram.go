@@ -246,7 +246,7 @@ func getEntropyUnrefined(population []uint32) (bitEntropy, streaks) {
 // getCombinedEntropyUnrefined computes the unrefined bit entropy and streak
 // stats for the element-wise sum of two equal-length arrays. The streak
 // processing logic is fully inlined at both call sites to eliminate closure
-// dispatch overhead and enable better register allocation in this 30% CPU hotpath.
+// dispatch overhead and enable better register allocation in this 25% CPU hotpath.
 func getCombinedEntropyUnrefined(X, Y []uint32) (bitEntropy, streaks) {
 	var be bitEntropy
 	var st streaks
@@ -267,6 +267,15 @@ func getCombinedEntropyUnrefined(X, Y []uint32) (bitEntropy, streaks) {
 
 	for i := 1; i < length; i++ {
 		xy := X[i] + Y[i]
+		// Fast skip: if both current and previous are zero, scan ahead to
+		// find the end of the zero run. This avoids per-element overhead
+		// for the common case of sparse histograms with long zero runs.
+		if xy == 0 && xyPrev == 0 {
+			for i+1 < length && X[i+1]+Y[i+1] == 0 {
+				i++
+			}
+			continue
+		}
 		if xy != xyPrev {
 			// Inline processStreak (transition to new value)
 			streak := i - iPrev
@@ -508,7 +517,39 @@ func (h *Histogram) computeHistogramCost() {
 type HistoSet struct {
 	histos    []*Histogram
 	cacheBits int
-	curCombo  *Histogram // scratch for entropy bin combining
+	curCombo  *Histogram    // scratch for entropy bin combining
+	tiles     *tileTracker  // if non-nil, tracks original tile indices per entry
+}
+
+// tileTracker maps imageHisto indices to original tile indices using linked
+// lists backed by flat arrays. This avoids per-tile slice allocations.
+type tileTracker struct {
+	head []int // head[imageHistoIdx] = first original tile index in cluster
+	tail []int // tail[imageHistoIdx] = last original tile index in cluster
+	next []int // next[origTileIdx] = next tile in same cluster, -1 = end
+}
+
+// merge appends all tiles from cluster src into cluster dst.
+func (t *tileTracker) merge(dst, src int) {
+	if t.head[src] < 0 {
+		return
+	}
+	if t.head[dst] < 0 {
+		t.head[dst] = t.head[src]
+		t.tail[dst] = t.tail[src]
+	} else {
+		t.next[t.tail[dst]] = t.head[src]
+		t.tail[dst] = t.tail[src]
+	}
+}
+
+// swapRemove removes entry at idx by moving the last entry into its slot.
+func (t *tileTracker) swapRemove(idx int) {
+	last := len(t.head) - 1
+	t.head[idx] = t.head[last]
+	t.tail[idx] = t.tail[last]
+	t.head = t.head[:last]
+	t.tail = t.tail[:last]
 }
 
 // HistoScratch holds reusable slab buffers for histogram allocation across
@@ -592,6 +633,9 @@ func (hs *HistoSet) remove(i int) {
 	hs.histos[i] = hs.histos[last]
 	hs.histos[last] = nil
 	hs.histos = hs.histos[:last]
+	if hs.tiles != nil {
+		hs.tiles.swapRemove(i)
+	}
 }
 
 // clearAll zeros out all histograms in the set.
@@ -861,6 +905,20 @@ func getCombineCostFactor(histoSize, quality int) float64 {
 	return factor
 }
 
+// histoTileSorter sorts histograms by binID while keeping tileTracker in sync.
+type histoTileSorter struct {
+	histos []*Histogram
+	tiles  *tileTracker
+}
+
+func (s histoTileSorter) Len() int { return len(s.histos) }
+func (s histoTileSorter) Swap(i, j int) {
+	s.histos[i], s.histos[j] = s.histos[j], s.histos[i]
+	s.tiles.head[i], s.tiles.head[j] = s.tiles.head[j], s.tiles.head[i]
+	s.tiles.tail[i], s.tiles.tail[j] = s.tiles.tail[j], s.tiles.tail[i]
+}
+func (s histoTileSorter) Less(i, j int) bool { return s.histos[i].binID < s.histos[j].binID }
+
 // histogramCombineEntropyBin merges histograms with the same bin_id when
 // doing so reduces coding cost.
 func histogramCombineEntropyBin(imageHisto *HistoSet, numBins int,
@@ -870,9 +928,13 @@ func histogramCombineEntropyBin(imageHisto *HistoSet, numBins int,
 	// prediction during the combining loop. Histograms with the same bin
 	// end up adjacent, reducing cache misses on the first/idx lookups.
 	histograms := imageHisto.histos
-	sort.Slice(histograms, func(i, j int) bool {
-		return histograms[i].binID < histograms[j].binID
-	})
+	if imageHisto.tiles != nil {
+		sort.Sort(histoTileSorter{histograms, imageHisto.tiles})
+	} else {
+		sort.Slice(histograms, func(i, j int) bool {
+			return histograms[i].binID < histograms[j].binID
+		})
+	}
 
 	type binInfo struct {
 		first              int
@@ -899,6 +961,9 @@ func histogramCombineEntropyBin(imageHisto *HistoSet, numBins int,
 			idx++
 		} else if lowEffort {
 			histogramAdd(histograms[idx], histograms[first], histograms[first])
+			if t := imageHisto.tiles; t != nil {
+				t.merge(first, idx)
+			}
 			imageHisto.remove(idx)
 			histograms = imageHisto.histos
 		} else {
@@ -935,6 +1000,9 @@ func histogramCombineEntropyBin(imageHisto *HistoSet, numBins int,
 				}
 				if tryCombine || bins[bID].numCombineFailures >= maxCombineFailures {
 					histograms[first], curCombo = curCombo, histograms[first]
+					if t := imageHisto.tiles; t != nil {
+						t.merge(first, idx)
+					}
 					imageHisto.histos = histograms
 					imageHisto.remove(idx)
 					histograms = imageHisto.histos
@@ -978,11 +1046,21 @@ func histogramCombineGreedy(imageHisto *HistoSet) {
 		histograms[idx1].bitCost = q.queue[0].costCombo
 		histograms[idx1].costs = q.queue[0].costs
 
+		if t := imageHisto.tiles; t != nil {
+			t.merge(idx1, idx2)
+		}
+
 		lastIdx := len(histograms) - 1
 		histograms[idx2] = histograms[lastIdx]
 		histograms[lastIdx] = nil
 		histograms = histograms[:lastIdx]
 		imageHisto.histos = histograms
+		if t := imageHisto.tiles; t != nil {
+			t.head[idx2] = t.head[lastIdx]
+			t.tail[idx2] = t.tail[lastIdx]
+			t.head = t.head[:lastIdx]
+			t.tail = t.tail[:lastIdx]
+		}
 
 		// Remove pairs involving idx1 or idx2; fix references to lastIdx.
 		i := 0
@@ -1076,6 +1154,11 @@ func histogramCombineStochastic(imageHisto *HistoSet, minClusterSize int) bool {
 		histograms[bestIdx1].bitCost = q.queue[0].costCombo
 		histograms[bestIdx1].costs = q.queue[0].costs
 
+		// Merge tile tracking before swap-remove.
+		if t := imageHisto.tiles; t != nil {
+			t.merge(bestIdx1, bestIdx2)
+		}
+
 		// Remove bestIdx2 by moving the last histogram into its slot.
 		// Keep the full slice accessible during pair fixup (like C which
 		// only decrements size but doesn't free memory), then truncate
@@ -1087,6 +1170,10 @@ func histogramCombineStochastic(imageHisto *HistoSet, minClusterSize int) bool {
 		// newSize is the logical size after removal, matching C's
 		// image_histo->size after HistogramSetRemoveHistogram.
 		newSize := lastIdx
+		if t := imageHisto.tiles; t != nil {
+			t.head[bestIdx2] = t.head[lastIdx]
+			t.tail[bestIdx2] = t.tail[lastIdx]
+		}
 
 		// Parse the queue and update each pair that deals with
 		// bestIdx1, bestIdx2, or the moved-from lastIdx.
@@ -1132,6 +1219,10 @@ func histogramCombineStochastic(imageHisto *HistoSet, minClusterSize int) bool {
 		histograms[lastIdx] = nil // allow GC
 		histograms = histograms[:newSize]
 		imageHisto.histos = histograms
+		if t := imageHisto.tiles; t != nil {
+			t.head = t.head[:newSize]
+			t.tail = t.tail[:newSize]
+		}
 		triesWithNoSuccess = 0
 	}
 
@@ -1178,7 +1269,11 @@ func histogramRemap(origHistos []*Histogram, imageHisto *HistoSet,
 							continue
 						}
 						bestOut := 0
-						bestBits := math.MaxFloat64
+						// Initialize bestBits to the tile's own cost as an upper
+						// bound. By entropy convexity, the marginal cost of adding
+						// h to any cluster <= h.bitCost. This allows earlier
+						// bail-outs in getCombinedHistogramEntropy.
+						bestBits := h.bitCost
 						for k := 0; k < outSize; k++ {
 							curBits, ok := histogramAddThresh(outHistos[k], h, bestBits)
 							if ok {
@@ -1211,7 +1306,7 @@ func histogramRemap(origHistos []*Histogram, imageHisto *HistoSet,
 					continue
 				}
 				bestOut := 0
-				bestBits := math.MaxFloat64
+				bestBits := h.bitCost
 				for k := 0; k < outSize; k++ {
 					curBits, ok := histogramAddThresh(outHistos[k], h, bestBits)
 					if ok {
@@ -1316,6 +1411,10 @@ func GetHistoImageSymbols(width, height int, refs *BackwardRefs, quality int,
 	// Parallel cost computation for initial histograms.
 	parallelComputeHistogramCost(origHisto.histos[:imageHistoRawSize])
 
+	// For Q<90, track tile→cluster assignments during combining so we can
+	// skip the expensive rebuild + remap pass.
+	skipRemap := quality < 90
+
 	// Serial filtering: append non-empty histograms.
 	for i := 0; i < imageHistoRawSize; i++ {
 		h := origHisto.histos[i]
@@ -1325,6 +1424,33 @@ func GetHistoImageSymbols(width, height int, refs *BackwardRefs, quality int,
 			continue
 		}
 		imageHisto.histos = append(imageHisto.histos, h)
+	}
+
+	// Initialize tile tracking: each imageHisto entry starts with its
+	// corresponding original tile index as a single-element linked list.
+	if skipRemap {
+		n := len(imageHisto.histos)
+		tt := &tileTracker{
+			head: make([]int, n),
+			tail: make([]int, n),
+			next: make([]int, imageHistoRawSize),
+		}
+		for i := range tt.next {
+			tt.next[i] = -1
+		}
+		j := 0
+		for i := 0; i < imageHistoRawSize; i++ {
+			h := origHisto.histos[i]
+			if !h.isUsed[histLiteral] && !h.isUsed[histRed] &&
+				!h.isUsed[histBlue] && !h.isUsed[histAlpha] &&
+				!h.isUsed[histDistance] {
+				continue
+			}
+			tt.head[j] = i
+			tt.tail[j] = i
+			j++
+		}
+		imageHisto.tiles = tt
 	}
 
 	// Entropy bin combining.
@@ -1360,29 +1486,51 @@ func GetHistoImageSymbols(width, height int, refs *BackwardRefs, quality int,
 	}
 
 	// Extract cluster centers into a small separate slab so origHisto's
-	// backing memory can be rebuilt for the remap pass.
+	// backing memory can be rebuilt for the remap pass (or decoupled from
+	// origHisto when using tracked assignments).
 	extractClusterCenters(imageHisto, cacheBits)
 
-	// Rebuild origHisto from backward refs. Clustering modified shared data.
-	origHisto.clearAll()
-	histogramBuild(width, histoBits, refs, origHisto)
-
-	// Parallel cost recomputation after rebuild.
-	parallelComputeHistogramCost(origHisto.histos[:imageHistoRawSize])
-
-	// Nil out empty entries (index > 0) for histogramRemap.
-	for i := 1; i < imageHistoRawSize; i++ {
-		h := origHisto.histos[i]
-		if !h.isUsed[histLiteral] && !h.isUsed[histRed] &&
-			!h.isUsed[histBlue] && !h.isUsed[histAlpha] &&
-			!h.isUsed[histDistance] {
-			origHisto.histos[i] = nil
-		}
-	}
-
-	// Final remap: assign each original tile to the nearest output cluster.
 	symbols := make([]uint16, imageHistoRawSize)
-	histogramRemap(origHisto.histos, imageHisto, symbols)
+
+	if skipRemap && imageHisto.tiles != nil {
+		// Fast path: build symbols directly from tracked tile→cluster
+		// assignments. Avoids the expensive rebuild + recompute + remap.
+		for i := range symbols {
+			symbols[i] = 0xFFFF // sentinel for unassigned (empty) tiles
+		}
+		tt := imageHisto.tiles
+		for clusterIdx := 0; clusterIdx < len(imageHisto.histos); clusterIdx++ {
+			for idx := tt.head[clusterIdx]; idx >= 0; idx = tt.next[idx] {
+				symbols[idx] = uint16(clusterIdx)
+			}
+		}
+		// Empty tiles inherit their predecessor's cluster (left-to-right).
+		for i := 0; i < imageHistoRawSize; i++ {
+			if symbols[i] == 0xFFFF {
+				if i > 0 {
+					symbols[i] = symbols[i-1]
+				} else {
+					symbols[i] = 0
+				}
+			}
+		}
+		imageHisto.tiles = nil // release tracking data
+	} else {
+		// Full remap path: rebuild per-tile histograms and reassign to
+		// nearest cluster for maximum compression quality.
+		origHisto.clearAll()
+		histogramBuild(width, histoBits, refs, origHisto)
+		parallelComputeHistogramCost(origHisto.histos[:imageHistoRawSize])
+		for i := 1; i < imageHistoRawSize; i++ {
+			h := origHisto.histos[i]
+			if !h.isUsed[histLiteral] && !h.isUsed[histRed] &&
+				!h.isUsed[histBlue] && !h.isUsed[histAlpha] &&
+				!h.isUsed[histDistance] {
+				origHisto.histos[i] = nil
+			}
+		}
+		histogramRemap(origHisto.histos, imageHisto, symbols)
+	}
 
 	// Recompute final costs.
 	for _, h := range imageHisto.histos {

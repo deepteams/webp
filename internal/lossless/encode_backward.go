@@ -733,9 +733,17 @@ func GetBackwardReferencesWithScratch(
 		}
 	}
 
-	// Phase 2: Find the optimal color cache size via brute-force search.
-	// Use the best LZ77 refs (in best) as input.
-	bestCacheBits := CalculateBestCacheSize(argb, quality, best, cacheBitsMax, scratch)
+	// Phase 2: Find the optimal color cache size.
+	// For quality <= 75, use a fixed cache size to skip the expensive search.
+	// The brute-force search evaluates all candidates (0..cacheBitsMax) which
+	// costs ~50ms. For photographic images, the optimal cache is nearly always
+	// close to cacheBitsMax, so using it directly is a safe speed/quality tradeoff.
+	var bestCacheBits int
+	if quality <= 75 && cacheBitsMax > 0 {
+		bestCacheBits = cacheBitsMax
+	} else {
+		bestCacheBits = CalculateBestCacheSize(argb, quality, best, cacheBitsMax, scratch)
+	}
 
 	// Phase 3: If a color cache is beneficial, apply it to the refs.
 	if bestCacheBits > 0 {
