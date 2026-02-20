@@ -26,7 +26,17 @@ func doTransform(bits uint32, src []int16, dst []byte) {
 	case 2:
 		dsp.TransformAC3(src, dst)
 	case 1:
-		dsp.TransformDC(src, dst)
+		// Inline DC-only transform: avoids function-variable dispatch overhead.
+		// All 16 pixels get the same DC add value.
+		add := (int(src[0]) + 4) >> 3
+		_ = dst[3+3*BPS] // BCE hint
+		for j := 0; j < 4; j++ {
+			off := j * BPS
+			dst[off+0] = dsp.Clip8b(int(dst[off+0]) + add)
+			dst[off+1] = dsp.Clip8b(int(dst[off+1]) + add)
+			dst[off+2] = dsp.Clip8b(int(dst[off+2]) + add)
+			dst[off+3] = dsp.Clip8b(int(dst[off+3]) + add)
+		}
 	default:
 		// code == 0: no coefficients, nothing to do.
 	}
@@ -38,8 +48,33 @@ func doUVTransform(bits uint32, src []int16, dst []byte) {
 		if bits&0xaa != 0 {
 			dsp.TransformUV(src, dst)
 		} else {
-			dsp.TransformDCUV(src, dst)
+			// Inline DC-only UV transform for all 4 chroma blocks.
+			if src[0] != 0 {
+				doTransformDCBlock(src[0:], dst[0:])
+			}
+			if src[16] != 0 {
+				doTransformDCBlock(src[16:], dst[4:])
+			}
+			if src[32] != 0 {
+				doTransformDCBlock(src[32:], dst[4*BPS:])
+			}
+			if src[48] != 0 {
+				doTransformDCBlock(src[48:], dst[4*BPS+4:])
+			}
 		}
+	}
+}
+
+// doTransformDCBlock applies an inlined DC-only 4x4 inverse transform.
+func doTransformDCBlock(src []int16, dst []byte) {
+	add := (int(src[0]) + 4) >> 3
+	_ = dst[3+3*BPS] // BCE hint
+	for j := 0; j < 4; j++ {
+		off := j * BPS
+		dst[off+0] = dsp.Clip8b(int(dst[off+0]) + add)
+		dst[off+1] = dsp.Clip8b(int(dst[off+1]) + add)
+		dst[off+2] = dsp.Clip8b(int(dst[off+2]) + add)
+		dst[off+3] = dsp.Clip8b(int(dst[off+3]) + add)
 	}
 }
 
@@ -126,7 +161,7 @@ func (dec *Decoder) reconstructRow() {
 
 			for n := 0; n < 16; n++ {
 				blockOff := yBase + kScan[n]
-				dsp.PredLuma4[block.IModes[n]](buf, blockOff)
+				dsp.PredLuma4Direct(int(block.IModes[n]), buf, blockOff)
 				doTransform(bits, coeffs[n*16:], buf[blockOff:])
 				bits <<= 2
 			}
