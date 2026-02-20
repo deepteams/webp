@@ -8,6 +8,11 @@ package lossless
 //
 // Reference: libwebp/src/enc/backward_references_enc.c
 
+import (
+	"runtime"
+	"sync"
+)
+
 const (
 	// hashBits is the number of bits for the hash key.
 	hashBits = 18
@@ -78,7 +83,8 @@ type HashChain struct {
 	// Format: offset = value >> maxLengthBits, length = value & maxLength.
 	OffsetLength     []uint32
 	size             int
-	hashToFirstIndex []int32 // reusable between Fill() calls
+	hashToFirstIndex []int32  // reusable between Fill() calls
+	chainBuf         []uint32 // separate chain buffer for parallel second pass
 }
 
 // NewHashChain creates a hash chain for an image of the given pixel count.
@@ -201,8 +207,19 @@ func (hc *HashChain) Fill(argb []uint32, quality int, xsize, ysize int, lowEffor
 		chainSlice[size-2] = uint32(hashToFirstIndex[getPixPairHash64(argb[size-2:])])
 	}
 
-	// Second pass: find best matches, iterating from right to left (9.3, 9.5).
-	// The right-most pixel cannot match anything to the right.
+	// Decide between parallel and serial second pass.
+	numWorkers := runtime.GOMAXPROCS(0)
+	if numWorkers > 1 && size > 50000 && !lowEffort {
+		hc.fillParallel(argb, xsize, size, iterMax, winSize, numWorkers)
+	} else {
+		hc.fillSerial(argb, xsize, size, iterMax, lowEffort, winSize)
+	}
+}
+
+// fillSerial is the original sequential second pass with interleaved left-extension.
+func (hc *HashChain) fillSerial(argb []uint32, xsize, size, iterMax int, lowEffort bool, winSize uint32) {
+	chainSlice := hc.OffsetLength
+
 	hc.OffsetLength[0] = 0
 	hc.OffsetLength[size-1] = 0
 
@@ -296,6 +313,145 @@ func (hc *HashChain) Fill(argb []uint32, quality int, xsize, ysize int, lowEffor
 				maxBasePosition = basePosition
 			}
 		}
+	}
+}
+
+// fillParallel implements the second pass using parallel match-finding followed
+// by a serial left-extension pass. The chain links are copied to a separate
+// buffer so workers can read chains while writing match results concurrently.
+func (hc *HashChain) fillParallel(argb []uint32, xsize, size, iterMax int, winSize uint32, numWorkers int) {
+	// Copy chain links to separate buffer so workers can read chains
+	// while writing to OffsetLength concurrently.
+	if cap(hc.chainBuf) >= size {
+		hc.chainBuf = hc.chainBuf[:size]
+	} else {
+		hc.chainBuf = make([]uint32, size)
+	}
+	copy(hc.chainBuf, hc.OffsetLength)
+	chain := hc.chainBuf
+
+	hc.OffsetLength[0] = 0
+	hc.OffsetLength[size-1] = 0
+
+	// Parallel match-finding: each worker finds best matches for its
+	// position range. Workers only read from chain[] and argb[] (shared,
+	// immutable) and write to distinct ranges of OffsetLength[].
+	if numWorkers > size/1000 {
+		numWorkers = size / 1000
+	}
+	if numWorkers < 1 {
+		numWorkers = 1
+	}
+
+	positionsPerWorker := (size - 2 + numWorkers - 1) / numWorkers
+	var wg sync.WaitGroup
+	wg.Add(numWorkers)
+	for w := 0; w < numWorkers; w++ {
+		posStart := 1 + w*positionsPerWorker
+		posEnd := posStart + positionsPerWorker
+		if posEnd > size-1 {
+			posEnd = size - 1
+		}
+		go func(posStart, posEnd int) {
+			defer wg.Done()
+			fillMatchRange(hc.OffsetLength, chain, argb, xsize, size, iterMax, winSize, posStart, posEnd)
+		}(posStart, posEnd)
+	}
+	wg.Wait()
+
+	// Serial left-extension pass: propagate match extensions right-to-left.
+	// If position P+1 has a match at distance D that extends to position P
+	// (i.e., argb[P-D] == argb[P]), and the extended length exceeds P's
+	// own match, override P's match with the extension.
+	for p := uint32(size - 3); p > 0; p-- {
+		rightMatch := hc.OffsetLength[p+1]
+		rightDist := rightMatch >> maxLengthBits
+		if rightDist == 0 || p < rightDist {
+			continue
+		}
+		if argb[p-rightDist] != argb[p] {
+			continue
+		}
+		rightLen := rightMatch & maxLength
+		newLen := rightLen + 1
+		if newLen > maxLength {
+			newLen = maxLength
+		}
+		myLen := hc.OffsetLength[p] & maxLength
+		if newLen > myLen {
+			hc.OffsetLength[p] = (rightDist << maxLengthBits) | newLen
+		}
+	}
+}
+
+// fillMatchRange finds best matches for positions [posStart, posEnd) without
+// left-extension. Reads from chain and argb (immutable), writes to offsetLength.
+func fillMatchRange(offsetLength, chain []uint32, argb []uint32, xsize, size, iterMax int, winSize uint32, posStart, posEnd int) {
+	for basePosition := uint32(posEnd - 1); int(basePosition) >= posStart; basePosition-- {
+		maxLen := maxFindCopyLength(int(uint32(size) - 1 - basePosition))
+		argbStart := argb[basePosition:]
+		iter := iterMax
+		bestLength := 0
+		bestDistance := uint32(0)
+		minPos := int32(0)
+		if basePosition > winSize {
+			minPos = int32(basePosition - winSize)
+		}
+		lengthMax := maxLen
+		if lengthMax > 256 {
+			lengthMax = 256
+		}
+
+		pos := int32(chain[basePosition])
+
+		// 9.5: Spatial heuristics - check pixel above and to the left.
+		// Heuristic: compare with pixel above.
+		if basePosition >= uint32(xsize) {
+			currLength := findMatchLength(argb[basePosition-uint32(xsize):], argbStart, bestLength, maxLen)
+			if currLength > bestLength {
+				bestLength = currLength
+				bestDistance = uint32(xsize)
+			}
+			iter--
+		}
+		// Heuristic: compare with previous pixel.
+		if basePosition > 0 {
+			currLength := findMatchLength(argb[basePosition-1:], argbStart, bestLength, maxLen)
+			if currLength > bestLength {
+				bestLength = currLength
+				bestDistance = 1
+			}
+			iter--
+		}
+		// Skip the chain loop if we already have the maximum.
+		if bestLength == maxLength {
+			pos = minPos - 1
+		}
+
+		bestArgb := argbStart[bestLength]
+
+		for ; pos >= minPos && iter > 0; pos = int32(chain[pos]) {
+			iter--
+
+			if argb[pos+int32(bestLength)] != bestArgb {
+				continue
+			}
+
+			currLength := findMatchLength(argb[pos:], argbStart, 0, maxLen)
+			if bestLength < currLength {
+				bestLength = currLength
+				bestDistance = basePosition - uint32(pos)
+				bestArgb = argbStart[bestLength]
+				if bestLength >= lengthMax {
+					break
+				}
+			}
+		}
+
+		if bestLength > maxLength {
+			bestLength = maxLength
+		}
+		offsetLength[basePosition] = (bestDistance << maxLengthBits) | uint32(bestLength)
 	}
 }
 
