@@ -6,6 +6,18 @@ package lossless
 // Reference: libwebp/src/dec/vp8l_dec.c (ReadTransform, ApplyInverseTransforms)
 // and libwebp/src/dsp/lossless.c (VP8LInverseTransform).
 
+import (
+	"runtime"
+	"sync"
+
+	"github.com/deepteams/webp/internal/dsp"
+)
+
+// minPixelsForParallel is the minimum number of pixels to justify parallel
+// processing in row-independent transforms. Below this threshold, the
+// goroutine overhead exceeds the benefit.
+const minPixelsForParallel = 100000 // ~316x316
+
 // readTransform reads a single transform from the bitstream. Returns the
 // (possibly modified) xsize for subsequent transforms.
 func (dec *Decoder) readTransform(xsize, ysize int) (int, error) {
@@ -136,17 +148,27 @@ func (dec *Decoder) applyInverseTransforms(pixels []uint32) []uint32 {
 }
 
 // inverseTransform applies a single inverse transform to the pixel data.
+// Row-independent transforms (SubtractGreen, CrossColor) are parallelized
+// for large images.
 func inverseTransform(t *Transform, rowStart, rowEnd int, in, out []uint32) {
 	width := t.XSize
+	numRows := rowEnd - rowStart
+	numPixels := numRows * width
+
 	switch t.Type {
 	case SubtractGreenTransform:
-		addGreenToBlueAndRed(in, (rowEnd-rowStart)*width, out)
+		addGreenToBlueAndRed(in, numPixels, out)
 
 	case PredictorTransform:
 		predictorInverseTransform(t, rowStart, rowEnd, in, out)
 
 	case CrossColorTransform:
-		colorSpaceInverseTransform(t, rowStart, rowEnd, in, out)
+		numWorkers := runtime.GOMAXPROCS(0)
+		if numWorkers > 1 && numPixels >= minPixelsForParallel {
+			colorSpaceInverseTransformParallel(t, rowStart, rowEnd, in, out, numWorkers)
+		} else {
+			colorSpaceInverseTransform(t, rowStart, rowEnd, in, out)
+		}
 
 	case ColorIndexingTransform:
 		colorIndexInverseTransform(t, rowStart, rowEnd, in, out)
@@ -155,19 +177,23 @@ func inverseTransform(t *Transform, rowStart, rowEnd int, in, out []uint32) {
 
 // addGreenToBlueAndRed applies the inverse of the subtract-green transform:
 // adds the green channel value back to blue and red channels.
+// Uses SIMD-accelerated DSP function (ARM64 NEON / AMD64 SSE2).
 func addGreenToBlueAndRed(src []uint32, numPixels int, dst []uint32) {
-	for i := 0; i < numPixels; i++ {
-		argb := src[i]
-		green := (argb >> 8) & 0xff
-		redBlue := argb & 0x00ff00ff
-		redBlue += (green << 16) | green
-		redBlue &= 0x00ff00ff
-		dst[i] = (argb & 0xff00ff00) | redBlue
+	if numPixels <= 0 {
+		return
 	}
+	// Copy src to dst first if different buffers, then apply in-place SIMD.
+	if len(src) > 0 && len(dst) > 0 && &src[0] != &dst[0] {
+		copy(dst[:numPixels], src[:numPixels])
+	}
+	dsp.AddGreenToBlueAndRed(dst, numPixels)
 }
 
 // predictorInverseTransform applies the inverse predictor transform.
 // 14 spatial predictor modes are used, tiled across the image.
+// The prediction mode switch is moved outside the inner loop so each tile
+// uses a specialized loop without per-pixel branch overhead.
+// Row slices are pre-computed for BCE elimination.
 func predictorInverseTransform(t *Transform, yStart, yEnd int, in, out []uint32) {
 	width := t.XSize
 	inOff := 0
@@ -177,8 +203,10 @@ func predictorInverseTransform(t *Transform, yStart, yEnd int, in, out []uint32)
 		// First row: pixel 0 uses predictor 0 (black + residual = residual).
 		out[outOff] = addPixels(in[inOff], 0xff000000) // predictor 0 = ARGB black
 		// Rest of first row uses predictor 1 (left pixel).
+		inRow := in[inOff : inOff+width]
+		outRow := out[outOff : outOff+width]
 		for x := 1; x < width; x++ {
-			out[outOff+x] = addPixels(in[inOff+x], out[outOff+x-1])
+			outRow[x] = addPixels(inRow[x], outRow[x-1])
 		}
 		inOff += width
 		outOff += width
@@ -188,71 +216,130 @@ func predictorInverseTransform(t *Transform, yStart, yEnd int, in, out []uint32)
 	tileWidth := 1 << t.Bits
 	tileMask := tileWidth - 1
 	tilesPerRow := VP8LSubSampleSize(width, t.Bits)
+	tData := t.Data
 
 	for y := yStart; y < yEnd; y++ {
 		predModeRow := (y >> t.Bits) * tilesPerRow
 
+		// Pre-slice rows for the compiler to eliminate bounds checks.
+		inRow := in[inOff : inOff+width]
+		outRow := out[outOff : outOff+width]
+		topRow := out[outOff-width : outOff]
+
 		// First pixel of the row: predictor mode 2 (top pixel).
-		out[outOff] = addPixels(in[inOff], out[outOff-width])
+		outRow[0] = addPixels(inRow[0], topRow[0])
 
 		x := 1
 		for x < width {
-			predMode := int((t.Data[predModeRow+(x>>t.Bits)] >> 8) & 0xf)
+			predMode := int((tData[predModeRow+(x>>t.Bits)] >> 8) & 0xf)
 			xEnd := (x & ^tileMask) + tileWidth
 			if xEnd > width {
 				xEnd = width
 			}
-			for ; x < xEnd; x++ {
-				var topRight uint32
-				if x < width-1 {
-					topRight = out[outOff+x+1-width]
-				} else {
-					// C reads upper[width] which equals out[0] of the current row.
-					topRight = out[outOff]
+
+			// Specialized inner loops per prediction mode avoid a 14-case
+			// switch + function call per pixel.
+			switch predMode {
+			case 0: // Black
+				for ; x < xEnd; x++ {
+					outRow[x] = addPixels(inRow[x], 0xff000000)
 				}
-				pred := predict(predMode, out[outOff+x-1], out[outOff+x-width], out[outOff+x-1-width], topRight)
-				out[outOff+x] = addPixels(in[inOff+x], pred)
+			case 1: // Left
+				for ; x < xEnd; x++ {
+					outRow[x] = addPixels(inRow[x], outRow[x-1])
+				}
+			case 2: // Top
+				for ; x < xEnd; x++ {
+					outRow[x] = addPixels(inRow[x], topRow[x])
+				}
+			case 3: // Top-Right
+				safeEnd := xEnd
+				if safeEnd >= width {
+					safeEnd = width - 1
+				}
+				for ; x < safeEnd; x++ {
+					outRow[x] = addPixels(inRow[x], topRow[x+1])
+				}
+				if x < xEnd { // last pixel of row
+					outRow[x] = addPixels(inRow[x], outRow[0])
+					x++
+				}
+			case 4: // Top-Left
+				topLeftRow := out[outOff-width-1+1 : outOff]
+				for ; x < xEnd; x++ {
+					outRow[x] = addPixels(inRow[x], topLeftRow[x-1])
+				}
+			case 5: // Average2(Average2(L,TR), T)
+				safeEnd := xEnd
+				if safeEnd >= width {
+					safeEnd = width - 1
+				}
+				for ; x < safeEnd; x++ {
+					outRow[x] = addPixels(inRow[x], average2(average2(outRow[x-1], topRow[x+1]), topRow[x]))
+				}
+				if x < xEnd {
+					outRow[x] = addPixels(inRow[x], average2(average2(outRow[x-1], outRow[0]), topRow[x]))
+					x++
+				}
+			case 6: // Average2(L, TL)
+				topLeftRow := out[outOff-width-1+1 : outOff]
+				for ; x < xEnd; x++ {
+					outRow[x] = addPixels(inRow[x], average2(outRow[x-1], topLeftRow[x-1]))
+				}
+			case 7: // Average2(L, T)
+				for ; x < xEnd; x++ {
+					outRow[x] = addPixels(inRow[x], average2(outRow[x-1], topRow[x]))
+				}
+			case 8: // Average2(TL, T)
+				topLeftRow := out[outOff-width-1+1 : outOff]
+				for ; x < xEnd; x++ {
+					outRow[x] = addPixels(inRow[x], average2(topLeftRow[x-1], topRow[x]))
+				}
+			case 9: // Average2(T, TR)
+				safeEnd := xEnd
+				if safeEnd >= width {
+					safeEnd = width - 1
+				}
+				for ; x < safeEnd; x++ {
+					outRow[x] = addPixels(inRow[x], average2(topRow[x], topRow[x+1]))
+				}
+				if x < xEnd {
+					outRow[x] = addPixels(inRow[x], average2(topRow[x], outRow[0]))
+					x++
+				}
+			case 10: // Average2(Average2(L, TL), Average2(T, TR))
+				topLeftRow := out[outOff-width-1+1 : outOff]
+				safeEnd := xEnd
+				if safeEnd >= width {
+					safeEnd = width - 1
+				}
+				for ; x < safeEnd; x++ {
+					outRow[x] = addPixels(inRow[x], average2(average2(outRow[x-1], topLeftRow[x-1]), average2(topRow[x], topRow[x+1])))
+				}
+				if x < xEnd {
+					outRow[x] = addPixels(inRow[x], average2(average2(outRow[x-1], topLeftRow[x-1]), average2(topRow[x], outRow[0])))
+					x++
+				}
+			case 11: // Select
+				for ; x < xEnd; x++ {
+					outRow[x] = addPixels(inRow[x], selectPredictor(outRow[x-1], topRow[x], out[outOff+x-1-width]))
+				}
+			case 12: // Clamped add-subtract full
+				for ; x < xEnd; x++ {
+					outRow[x] = addPixels(inRow[x], clampedAddSubtractFull(outRow[x-1], topRow[x], out[outOff+x-1-width]))
+				}
+			case 13: // Clamped add-subtract half
+				for ; x < xEnd; x++ {
+					outRow[x] = addPixels(inRow[x], clampedAddSubtractHalf(average2(outRow[x-1], topRow[x]), out[outOff+x-1-width]))
+				}
+			default: // Fallback (same as 0)
+				for ; x < xEnd; x++ {
+					outRow[x] = addPixels(inRow[x], 0xff000000)
+				}
 			}
 		}
 		inOff += width
 		outOff += width
-	}
-}
-
-// predict returns the prediction for pixel at position (col > 0, row > 0)
-// given the predictor mode.
-func predict(mode int, left, top, topLeft, topRight uint32) uint32 {
-	switch mode {
-	case 0: // Black
-		return 0xff000000
-	case 1: // Left
-		return left
-	case 2: // Top
-		return top
-	case 3: // Top-Right
-		return topRight
-	case 4: // Top-Left
-		return topLeft
-	case 5: // Average2(Average2(L,TR), T)
-		return average2(average2(left, topRight), top)
-	case 6: // Average2(L, TL)
-		return average2(left, topLeft)
-	case 7: // Average2(L, T)
-		return average2(left, top)
-	case 8: // Average2(TL, T)
-		return average2(topLeft, top)
-	case 9: // Average2(T, TR)
-		return average2(top, topRight)
-	case 10: // Average2(Average2(L, TL), Average2(T, TR))
-		return average2(average2(left, topLeft), average2(top, topRight))
-	case 11: // Select
-		return selectPredictor(left, top, topLeft)
-	case 12: // Clamped add-subtract full
-		return clampedAddSubtractFull(left, top, topLeft)
-	case 13: // Clamped add-subtract half
-		return clampedAddSubtractHalf(average2(left, top), topLeft)
-	default:
-		return 0xff000000
 	}
 }
 
@@ -347,6 +434,8 @@ func clampedAddSubtractHalf(avg, c uint32) uint32 {
 }
 
 // colorSpaceInverseTransform applies the inverse cross-color transform.
+// The multiplier extraction and transform arithmetic are inlined into the
+// tile loop to avoid per-pixel function call overhead.
 func colorSpaceInverseTransform(t *Transform, yStart, yEnd int, src, dst []uint32) {
 	width := t.XSize
 	tileWidth := 1 << t.Bits
@@ -354,9 +443,10 @@ func colorSpaceInverseTransform(t *Transform, yStart, yEnd int, src, dst []uint3
 	safeWidth := width & ^tileMask
 	remainingWidth := width - safeWidth
 	tilesPerRow := VP8LSubSampleSize(width, t.Bits)
+	tData := t.Data
 
-	srcOff := 0
-	dstOff := 0
+	srcOff := yStart * width
+	dstOff := yStart * width
 
 	for y := yStart; y < yEnd; y++ {
 		predRow := (y >> t.Bits) * tilesPerRow
@@ -364,17 +454,54 @@ func colorSpaceInverseTransform(t *Transform, yStart, yEnd int, src, dst []uint3
 
 		x := 0
 		for x < safeWidth {
-			m := colorCodeToMultipliers(t.Data[predRow+predIdx])
+			// Extract multipliers once per tile (int32 for inner loop).
+			colorCode := tData[predRow+predIdx]
+			g2r := int32(int8(colorCode))
+			g2b := int32(int8(colorCode >> 8))
+			r2b := int32(int8(colorCode >> 16))
 			predIdx++
+
+			srcSlice := src[srcOff+x:]
+			dstSlice := dst[dstOff+x:]
+			_ = srcSlice[tileWidth-1] // BCE
+			_ = dstSlice[tileWidth-1] // BCE
 			for i := 0; i < tileWidth; i++ {
-				dst[dstOff+x+i] = transformColorInverse(m, src[srcOff+x+i])
+				argb := srcSlice[i]
+				green := int32(int8(argb >> 8))
+				red := int32((argb >> 16) & 0xff)
+				blue := int32(argb & 0xff)
+
+				red += (g2r * green) >> 5
+				red &= 0xff
+				blue += (g2b * green) >> 5
+				blue += (r2b * int32(int8(red))) >> 5
+				blue &= 0xff
+
+				dstSlice[i] = (argb & 0xff00ff00) | (uint32(red) << 16) | uint32(blue)
 			}
 			x += tileWidth
 		}
 		if x < width {
-			m := colorCodeToMultipliers(t.Data[predRow+predIdx])
+			colorCode := tData[predRow+predIdx]
+			g2r := int32(int8(colorCode))
+			g2b := int32(int8(colorCode >> 8))
+			r2b := int32(int8(colorCode >> 16))
+
+			srcSlice := src[srcOff+x:]
+			dstSlice := dst[dstOff+x:]
 			for i := 0; i < remainingWidth; i++ {
-				dst[dstOff+x+i] = transformColorInverse(m, src[srcOff+x+i])
+				argb := srcSlice[i]
+				green := int32(int8(argb >> 8))
+				red := int32((argb >> 16) & 0xff)
+				blue := int32(argb & 0xff)
+
+				red += (g2r * green) >> 5
+				red &= 0xff
+				blue += (g2b * green) >> 5
+				blue += (r2b * int32(int8(red))) >> 5
+				blue &= 0xff
+
+				dstSlice[i] = (argb & 0xff00ff00) | (uint32(red) << 16) | uint32(blue)
 			}
 		}
 
@@ -383,36 +510,29 @@ func colorSpaceInverseTransform(t *Transform, yStart, yEnd int, src, dst []uint3
 	}
 }
 
-type colorMultipliers struct {
-	greenToRed  uint8
-	greenToBlue uint8
-	redToBlue   uint8
-}
-
-func colorCodeToMultipliers(colorCode uint32) colorMultipliers {
-	return colorMultipliers{
-		greenToRed:  uint8(colorCode),
-		greenToBlue: uint8(colorCode >> 8),
-		redToBlue:   uint8(colorCode >> 16),
+// colorSpaceInverseTransformParallel splits the cross-color transform across
+// multiple goroutines. Each worker processes a contiguous range of rows.
+// Safe because there are no row-to-row dependencies in this transform.
+func colorSpaceInverseTransformParallel(t *Transform, yStart, yEnd int, src, dst []uint32, numWorkers int) {
+	numRows := yEnd - yStart
+	if numWorkers > numRows {
+		numWorkers = numRows
 	}
-}
-
-func colorTransformDelta(colorPred int8, clr int8) int32 {
-	return (int32(colorPred) * int32(clr)) >> 5
-}
-
-func transformColorInverse(m colorMultipliers, argb uint32) uint32 {
-	green := int8(argb >> 8)
-	red := int32(argb>>16) & 0xff
-	blue := int32(argb) & 0xff
-
-	newRed := red + int32(colorTransformDelta(int8(m.greenToRed), green))
-	newRed &= 0xff
-	newBlue := blue + int32(colorTransformDelta(int8(m.greenToBlue), green))
-	newBlue += int32(colorTransformDelta(int8(m.redToBlue), int8(newRed)))
-	newBlue &= 0xff
-
-	return (argb & 0xff00ff00) | (uint32(newRed) << 16) | uint32(newBlue)
+	rowsPerWorker := numRows / numWorkers
+	var wg sync.WaitGroup
+	wg.Add(numWorkers)
+	for w := 0; w < numWorkers; w++ {
+		ys := yStart + w*rowsPerWorker
+		ye := ys + rowsPerWorker
+		if w == numWorkers-1 {
+			ye = yEnd
+		}
+		go func(ys, ye int) {
+			colorSpaceInverseTransform(t, ys, ye, src, dst)
+			wg.Done()
+		}(ys, ye)
+	}
+	wg.Wait()
 }
 
 // colorIndexInverseTransform applies the inverse color-indexing (palette)

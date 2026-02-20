@@ -3,6 +3,8 @@ package lossless
 import (
 	"image"
 	"testing"
+
+	"github.com/deepteams/webp/internal/bitio"
 )
 
 func TestDecodeHeader_Valid(t *testing.T) {
@@ -219,17 +221,24 @@ func TestColorIndexInverseTransform(t *testing.T) {
 	}
 }
 
-func TestTransformColorInverse(t *testing.T) {
-	// Test cross-color inverse with known multipliers.
-	m := colorMultipliers{
-		greenToRed:  0, // no cross-color
-		greenToBlue: 0,
-		redToBlue:   0,
+func TestColorSpaceInverseTransform(t *testing.T) {
+	// Test cross-color inverse with zero multipliers (identity).
+	// colorCode: greenToRed=byte0, greenToBlue=byte1, redToBlue=byte2
+	colorCode := uint32(0) // all zero multipliers
+	transform := Transform{
+		Type:  CrossColorTransform,
+		XSize: 4,
+		YSize: 1,
+		Bits:  2, // tileWidth = 4
+		Data:  []uint32{colorCode},
 	}
-	argb := uint32(0xff804020)
-	result := transformColorInverse(m, argb)
-	if result != argb {
-		t.Errorf("transformColorInverse (zero multipliers): got 0x%08x, want 0x%08x", result, argb)
+	src := []uint32{0xff804020, 0xff112233, 0xff445566, 0xff778899}
+	dst := make([]uint32, 4)
+	colorSpaceInverseTransform(&transform, 0, 1, src, dst)
+	for i := range src {
+		if dst[i] != src[i] {
+			t.Errorf("colorSpaceInverse (zero multipliers) [%d]: got 0x%08x, want 0x%08x", i, dst[i], src[i])
+		}
 	}
 }
 
@@ -284,8 +293,8 @@ func TestCopyBlock32_Overlap(t *testing.T) {
 }
 
 func TestGetCopyDistance(t *testing.T) {
-	// Use a mock bit reader.
-	br := &mockBR{bits: 0}
+	// For distanceSymbol < 4, no bits are read from the reader.
+	br := bitio.NewLosslessReader([]byte{0, 0, 0, 0, 0, 0, 0, 0})
 
 	// distanceSymbol < 4 => distance = symbol + 1
 	if d := getCopyDistance(0, br); d != 1 {
@@ -319,16 +328,3 @@ func TestARGBToNRGBAImage(t *testing.T) {
 	}
 }
 
-// mockBR is a minimal bit reader for testing getCopyDistance/getCopyLength.
-type mockBR struct {
-	bits uint32
-}
-
-func (m *mockBR) ReadBits(n int) uint32 {
-	return m.bits & ((1 << n) - 1)
-}
-func (m *mockBR) FillBitWindow()       {}
-func (m *mockBR) PrefetchBits() uint32 { return m.bits }
-func (m *mockBR) BitPos() int          { return 0 }
-func (m *mockBR) SetBitPos(int)        {}
-func (m *mockBR) IsEndOfStream() bool  { return false }

@@ -6,6 +6,8 @@ package lossless
 // Reference: libwebp/src/dec/vp8l_dec.c (ReadHuffmanCode, ReadHuffmanCodes,
 // ReadHuffmanCodesHelper, DecodeImageData).
 
+import "github.com/deepteams/webp/internal/bitio"
+
 // readHuffmanCodeLengths decodes Huffman-coded code lengths using a previously
 // built code-lengths Huffman table.
 func (dec *Decoder) readHuffmanCodeLengths(clTable []HuffmanCode, numSymbols int) ([]int, error) {
@@ -359,7 +361,8 @@ func (dec *Decoder) getHTreeGroup(x, y int) *HTreeGroup {
 }
 
 // getCopyDistance decodes the distance from a distance symbol.
-func getCopyDistance(distanceSymbol int, br brReader) int {
+// Uses concrete *bitio.LosslessReader to enable method inlining.
+func getCopyDistance(distanceSymbol int, br *bitio.LosslessReader) int {
 	if distanceSymbol < 4 {
 		return distanceSymbol + 1
 	}
@@ -369,23 +372,15 @@ func getCopyDistance(distanceSymbol int, br brReader) int {
 }
 
 // getCopyLength decodes the length from a length symbol.
-func getCopyLength(lengthSymbol int, br brReader) int {
+func getCopyLength(lengthSymbol int, br *bitio.LosslessReader) int {
 	return getCopyDistance(lengthSymbol, br) // same encoding
-}
-
-// brReader is a minimal interface for the bit reader used in decode loops.
-type brReader interface {
-	ReadBits(nBits int) uint32
-	FillBitWindow()
-	PrefetchBits() uint32
-	BitPos() int
-	SetBitPos(int)
-	IsEndOfStream() bool
 }
 
 // readSymbolFromTree decodes one Huffman symbol from a table using the
 // bit reader, performing the necessary fill/prefetch.
-func readSymbolFromTree(table []HuffmanCode, br brReader) int {
+// Uses concrete *bitio.LosslessReader so FillBitWindow/PrefetchBits/
+// SetBitPos/BitPos can inline (avoiding interface dispatch overhead).
+func readSymbolFromTree(table []HuffmanCode, br *bitio.LosslessReader) int {
 	br.FillBitWindow()
 	val, bitsUsed := ReadSymbol(table, br.PrefetchBits())
 	br.SetBitPos(br.BitPos() + bitsUsed)
@@ -395,7 +390,8 @@ func readSymbolFromTree(table []HuffmanCode, br brReader) int {
 // readPackedSymbols attempts to decode an entire ARGB pixel from the
 // packed table. Returns (value, code) where code == 0 means a full
 // literal was decoded into *dst, otherwise code is the non-literal symbol.
-func readPackedSymbols(group *HTreeGroup, br brReader) (argb uint32, greenCode int, isLiteral bool) {
+// Uses concrete *bitio.LosslessReader for method inlining.
+func readPackedSymbols(group *HTreeGroup, br *bitio.LosslessReader) (argb uint32, greenCode int, isLiteral bool) {
 	bits := br.PrefetchBits() & (HuffmanPackedTableSize - 1)
 	code := group.PackedTable[bits]
 	if code.Bits < bitsSpecialMarker {

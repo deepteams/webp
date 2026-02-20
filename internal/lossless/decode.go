@@ -3,6 +3,7 @@ package lossless
 import (
 	"errors"
 	"image"
+	"runtime"
 	"sync"
 
 	"github.com/deepteams/webp/internal/bitio"
@@ -295,23 +296,78 @@ const numArgbCacheRows = 16
 // argbToNRGBA converts an ARGB pixel buffer to image.NRGBA.
 // VP8L internal pixel order is ARGB (alpha in bits 31..24, red 23..16,
 // green 15..8, blue 7..0).
+// For large images, the conversion is parallelized across rows.
 func argbToNRGBA(pixels []uint32, width, height int) *image.NRGBA {
 	img := image.NewNRGBA(image.Rect(0, 0, width, height))
 	pix := img.Pix
 	stride := img.Stride
-	for y := 0; y < height; y++ {
+
+	numWorkers := runtime.GOMAXPROCS(0)
+	if numWorkers > 1 && width*height >= minPixelsForParallel {
+		rowsPerWorker := height / numWorkers
+		var wg sync.WaitGroup
+		wg.Add(numWorkers)
+		for w := 0; w < numWorkers; w++ {
+			yStart := w * rowsPerWorker
+			yEnd := yStart + rowsPerWorker
+			if w == numWorkers-1 {
+				yEnd = height
+			}
+			go func(yStart, yEnd int) {
+				argbToNRGBARows(pixels, pix, stride, width, yStart, yEnd)
+				wg.Done()
+			}(yStart, yEnd)
+		}
+		wg.Wait()
+	} else {
+		argbToNRGBARows(pixels, pix, stride, width, 0, height)
+	}
+	return img
+}
+
+// argbToNRGBARows converts a range of rows from ARGB to NRGBA byte layout.
+func argbToNRGBARows(pixels []uint32, pix []byte, stride, width, yStart, yEnd int) {
+	for y := yStart; y < yEnd; y++ {
 		row := pixels[y*width : y*width+width]
 		dst := pix[y*stride : y*stride+width*4]
-		for x, argb := range row {
-			off := x * 4
-			_ = dst[off+3] // BCE hint
+		n := len(row)
+		// Process 4 pixels at a time.
+		i := 0
+		for ; i+3 < n; i += 4 {
+			off := i * 4
+			_ = dst[off+15] // BCE for 4 pixels
+			a0 := row[i]
+			a1 := row[i+1]
+			a2 := row[i+2]
+			a3 := row[i+3]
+			dst[off+0] = uint8(a0 >> 16)
+			dst[off+1] = uint8(a0 >> 8)
+			dst[off+2] = uint8(a0)
+			dst[off+3] = uint8(a0 >> 24)
+			dst[off+4] = uint8(a1 >> 16)
+			dst[off+5] = uint8(a1 >> 8)
+			dst[off+6] = uint8(a1)
+			dst[off+7] = uint8(a1 >> 24)
+			dst[off+8] = uint8(a2 >> 16)
+			dst[off+9] = uint8(a2 >> 8)
+			dst[off+10] = uint8(a2)
+			dst[off+11] = uint8(a2 >> 24)
+			dst[off+12] = uint8(a3 >> 16)
+			dst[off+13] = uint8(a3 >> 8)
+			dst[off+14] = uint8(a3)
+			dst[off+15] = uint8(a3 >> 24)
+		}
+		// Remaining pixels.
+		for ; i < n; i++ {
+			off := i * 4
+			argb := row[i]
+			_ = dst[off+3] // BCE
 			dst[off+0] = uint8(argb >> 16)
 			dst[off+1] = uint8(argb >> 8)
 			dst[off+2] = uint8(argb)
 			dst[off+3] = uint8(argb >> 24)
 		}
 	}
-	return img
 }
 
 // NRGBAToARGB converts an NRGBA image back to a []uint32 ARGB buffer.
