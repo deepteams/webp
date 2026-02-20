@@ -28,6 +28,7 @@ func init() {
 
 	// DCT transforms.
 	ITransform = iTransformNEON
+	Transform = transformTwoDecNEON
 	// FTransform: NEON is slower than Go for 4x4 blocks on M2 Pro (16.2ns vs 13.3ns,
 	// benchmarked 2026-02-15). Due to strided byte packing overhead (INS chain).
 	// Keep pure Go — the compiler generates excellent scalar code.
@@ -42,6 +43,17 @@ func iTransformNEON(ref []byte, in []int16, dst []byte, doTwo bool) {
 	iTransformOneNEON(ref, in, dst)
 	if doTwo {
 		iTransformOneNEON(ref[4:], in[16:], dst[4:])
+	}
+}
+
+// transformTwoDecNEON wraps the encoder NEON IDCT for decoder use.
+// The decoder IDCT adds residuals to prediction already in dst, which is
+// equivalent to iTransformOneNEON(dst, in, dst) since the asm reads all
+// ref bytes before writing any dst bytes.
+func transformTwoDecNEON(in []int16, dst []byte, doTwo bool) {
+	iTransformOneNEON(dst, in, dst)
+	if doTwo {
+		iTransformOneNEON(dst[4:], in[16:], dst[4:])
 	}
 }
 

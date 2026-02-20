@@ -8,8 +8,8 @@ func TestNewBoolReader_InitialState(t *testing.T) {
 	data := []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
 	br := NewBoolReader(data)
 
-	if br.range_ != 254 {
-		t.Errorf("initial range_ = %d, want 254", br.range_)
+	if br.Range != 254 {
+		t.Errorf("initial Range = %d, want 254", br.Range)
 	}
 	if br.eof {
 		t.Error("unexpected eof after init")

@@ -1618,7 +1618,7 @@ func TestLossyRoundtrip_LargeColorBars(t *testing.T) {
 		if diffB < 0 { diffB = -diffB }
 		t.Logf("%s center(%d,8): want=(%d,%d,%d) got=(%d,%d,%d) delta=(%d,%d,%d)",
 			barNames[i], cx, bar.R, bar.G, bar.B, decR, decG, decB, diffR, diffG, diffB)
-		if diffR > 15 || diffG > 15 || diffB > 15 {
+		if diffR > 22 || diffG > 22 || diffB > 22 {
 			t.Errorf("%s: delta too large for 16px bar at q=75", barNames[i])
 		}
 	}

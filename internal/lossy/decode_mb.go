@@ -2,6 +2,7 @@ package lossy
 
 import (
 	"errors"
+	"math/bits"
 
 	"github.com/deepteams/webp/internal/bitio"
 	"github.com/deepteams/webp/internal/dsp"
@@ -14,72 +15,205 @@ var kCat3456 = [4][]uint8{
 	KCat3[:], KCat4[:], KCat5[:], KCat6[:],
 }
 
-// getLargeValue decodes a coefficient value >= 2 (Section 13.2).
-func getLargeValue(br *bitio.BoolReader, p []uint8) int {
-	var v int
-	if br.GetBit(p[3]) == 0 {
-		if br.GetBit(p[4]) == 0 {
-			v = 2
-		} else {
-			v = 3 + br.GetBit(p[5])
-		}
+// ---------------------------------------------------------------------------
+// Manually-inlined coefficient decoding for performance.
+//
+// The VP8 boolean decoder's GetBit is the dominant cost (~57% of decode time)
+// but Go cannot inline it (cost 152 > budget 80). By manually inlining the
+// GetBit arithmetic and keeping BoolReader state in local registers, we
+// eliminate per-call overhead and memory load/store traffic.
+// ---------------------------------------------------------------------------
+
+// fastBit decodes one boolean symbol. Pure arithmetic, no method calls.
+// Designed to be inlined by the Go compiler.
+func fastBit(prob uint8, brV uint64, brR uint32, brB int) (int, uint64, uint32, int) {
+	split := (brR * uint32(prob)) >> 8
+	val := uint32(brV >> uint(brB))
+	var bit int
+	if val > split {
+		bit = 1
+		brR -= split
+		brV -= uint64(split+1) << uint(brB)
 	} else {
-		if br.GetBit(p[6]) == 0 {
-			if br.GetBit(p[7]) == 0 {
-				v = 5 + br.GetBit(159)
-			} else {
-				v = 7 + 2*br.GetBit(165)
-				v += br.GetBit(145)
-			}
-		} else {
-			bit1 := br.GetBit(p[8])
-			bit0 := br.GetBit(p[9+bit1])
-			cat := 2*bit1 + bit0
-			v = 0
-			for _, tabProb := range kCat3456[cat] {
-				if tabProb == 0 {
-					break
-				}
-				v = v + v + br.GetBit(tabProb)
-			}
-			v += 3 + (8 << uint(cat))
-		}
+		brR = split + 1
 	}
-	return v
+	shift := 7 ^ (bits.Len32(brR) - 1)
+	brR = (brR << uint(shift)) - 1
+	brB -= shift
+	return bit, brV, brR, brB
 }
 
-// getCoeffs decodes coefficients for a single sub-block.
-// Returns the position of the last non-zero coefficient + 1.
-func getCoeffs(br *bitio.BoolReader, bands [16 + 1]*BandProbas, ctx int, dq [2]int, n int, out []int16) int {
+// fastSigned decodes a sign bit (prob=0x80) and returns +v or -v.
+// Pure arithmetic, designed to be inlined.
+func fastSigned(v int, brV uint64, brR uint32, brB int) (int, uint64, uint32, int) {
+	pos := brB
+	split := brR >> 1
+	val := uint32(brV >> uint(pos))
+	mask := int32(split-val) >> 31
+	brB--
+	brR = (brR + uint32(mask)) | 1
+	brV -= uint64((split + 1) & uint32(mask)) << uint(pos)
+	return (v ^ int(mask)) - int(mask), brV, brR, brB
+}
+
+// brLoad syncs local state to BoolReader and loads more bytes.
+// Called rarely (~1 in 56 GetBit calls). Must not be inlined to keep
+// the fast path small.
+//
+//go:noinline
+func brLoad(br *bitio.BoolReader, brV uint64, brB int) (uint64, int) {
+	br.Value = brV
+	br.Bits = brB
+	br.LoadNewBytes()
+	return br.Value, br.Bits
+}
+
+// brSync writes the local state back to the BoolReader.
+func brSync(br *bitio.BoolReader, brV uint64, brR uint32, brB int) {
+	br.Value = brV
+	br.Range = brR
+	br.Bits = brB
+}
+
+// getCoeffsInline is the hot-path version of getCoeffs with manually-inlined
+// GetBit/GetSigned operations. It keeps BoolReader state in local variables
+// to minimize memory traffic.
+func getCoeffsInline(br *bitio.BoolReader, bands *[17]*BandProbas, ctx int, dq0, dq1 int, n int, out []int16) int {
+	// Hoist BoolReader hot state into locals for register residency.
+	brV := br.Value
+	brR := br.Range
+	brB := br.Bits
+
 	p := bands[n].Probas[ctx][:]
 	for ; n < 16; n++ {
-		if br.GetBit(p[0]) == 0 {
-			return n // previous coeff was last non-zero
+		// Inline: if br.GetBit(p[0]) == 0 { return n }
+		if brB < 0 {
+			brV, brB = brLoad(br, brV, brB)
 		}
-		for br.GetBit(p[1]) == 0 { // sequence of zero coeffs
+		var bit int
+		bit, brV, brR, brB = fastBit(p[0], brV, brR, brB)
+		if bit == 0 {
+			brSync(br, brV, brR, brB)
+			return n
+		}
+
+		// Inline: for br.GetBit(p[1]) == 0 { ... zero run ... }
+		for {
+			if brB < 0 {
+				brV, brB = brLoad(br, brV, brB)
+			}
+			bit, brV, brR, brB = fastBit(p[1], brV, brR, brB)
+			if bit != 0 {
+				break
+			}
 			n++
 			p = bands[n].Probas[0][:]
 			if n == 16 {
+				brSync(br, brV, brR, brB)
 				return 16
 			}
 		}
-		// Non-zero coefficient.
+
+		// Inline: if br.GetBit(p[2]) == 0 { v=1 } else { v=getLargeValue }
+		if brB < 0 {
+			brV, brB = brLoad(br, brV, brB)
+		}
 		pCtx := &bands[n+1].Probas
 		var v int
-		if br.GetBit(p[2]) == 0 {
+		bit, brV, brR, brB = fastBit(p[2], brV, brR, brB)
+		if bit == 0 {
 			v = 1
 			p = pCtx[1][:]
 		} else {
-			v = getLargeValue(br, p)
+			// Inline getLargeValue.
+			if brB < 0 {
+				brV, brB = brLoad(br, brV, brB)
+			}
+			bit, brV, brR, brB = fastBit(p[3], brV, brR, brB)
+			if bit == 0 {
+				if brB < 0 {
+					brV, brB = brLoad(br, brV, brB)
+				}
+				bit, brV, brR, brB = fastBit(p[4], brV, brR, brB)
+				if bit == 0 {
+					v = 2
+				} else {
+					if brB < 0 {
+						brV, brB = brLoad(br, brV, brB)
+					}
+					bit, brV, brR, brB = fastBit(p[5], brV, brR, brB)
+					v = 3 + bit
+				}
+			} else {
+				if brB < 0 {
+					brV, brB = brLoad(br, brV, brB)
+				}
+				bit, brV, brR, brB = fastBit(p[6], brV, brR, brB)
+				if bit == 0 {
+					if brB < 0 {
+						brV, brB = brLoad(br, brV, brB)
+					}
+					bit, brV, brR, brB = fastBit(p[7], brV, brR, brB)
+					if bit == 0 {
+						if brB < 0 {
+							brV, brB = brLoad(br, brV, brB)
+						}
+						bit, brV, brR, brB = fastBit(159, brV, brR, brB)
+						v = 5 + bit
+					} else {
+						if brB < 0 {
+							brV, brB = brLoad(br, brV, brB)
+						}
+						bit, brV, brR, brB = fastBit(165, brV, brR, brB)
+						v = 7 + 2*bit
+						if brB < 0 {
+							brV, brB = brLoad(br, brV, brB)
+						}
+						bit, brV, brR, brB = fastBit(145, brV, brR, brB)
+						v += bit
+					}
+				} else {
+					if brB < 0 {
+						brV, brB = brLoad(br, brV, brB)
+					}
+					var bit1 int
+					bit1, brV, brR, brB = fastBit(p[8], brV, brR, brB)
+					if brB < 0 {
+						brV, brB = brLoad(br, brV, brB)
+					}
+					var bit0 int
+					bit0, brV, brR, brB = fastBit(p[9+bit1], brV, brR, brB)
+					cat := 2*bit1 + bit0
+					v = 0
+					for _, tabProb := range kCat3456[cat] {
+						if tabProb == 0 {
+							break
+						}
+						if brB < 0 {
+							brV, brB = brLoad(br, brV, brB)
+						}
+						bit, brV, brR, brB = fastBit(tabProb, brV, brR, brB)
+						v = v + v + bit
+					}
+					v += 3 + (8 << uint(cat))
+				}
+			}
 			p = pCtx[2][:]
 		}
-		// Dequantize: DC uses dq[0], AC uses dq[1].
-		dqIdx := 0
-		if n > 0 {
-			dqIdx = 1
+
+		// Inline: GetSigned(v)
+		dq := dq1
+		if n == 0 {
+			dq = dq0
 		}
-		out[KZigzag[n]] = int16(br.GetSigned(v) * dq[dqIdx])
+		if brB < 0 {
+			brV, brB = brLoad(br, brV, brB)
+		}
+		var sv int
+		sv, brV, brR, brB = fastSigned(v, brV, brR, brB)
+		out[KZigzag[n]] = int16(sv * dq)
 	}
+	brSync(br, brV, brR, brB)
 	return 16
 }
 
@@ -156,7 +290,7 @@ func (dec *Decoder) parseResiduals(mb, leftMB *MB, block *MBData, tokenBR *bitio
 	var nonZeroY uint32
 	var nonZeroUV uint32
 	var first int
-	var acProba [16 + 1]*BandProbas
+	var acProba *[17]*BandProbas
 
 	if !block.IsI4x4 {
 		// Parse DC (i16-DC = type 1).
@@ -167,7 +301,7 @@ func (dec *Decoder) parseResiduals(mb, leftMB *MB, block *MBData, tokenBR *bitio
 			dc[i] = 0
 		}
 		ctx := int(mb.NzDC) + int(leftMB.NzDC)
-		nz := getCoeffs(tokenBR, bands[1], ctx, q.Y2Mat, 0, dc[:])
+		nz := getCoeffsInline(tokenBR, &bands[1], ctx, q.Y2Mat[0], q.Y2Mat[1], 0, dc[:])
 		if nz > 0 {
 			mb.NzDC = 1
 			leftMB.NzDC = 1
@@ -186,10 +320,10 @@ func (dec *Decoder) parseResiduals(mb, leftMB *MB, block *MBData, tokenBR *bitio
 			}
 		}
 		first = 1
-		acProba = bands[0] // i16-AC = type 0
+		acProba = &bands[0] // i16-AC = type 0
 	} else {
 		first = 0
-		acProba = bands[3] // i4-AC = type 3
+		acProba = &bands[3] // i4-AC = type 3
 	}
 
 	// Luma AC.
@@ -200,7 +334,7 @@ func (dec *Decoder) parseResiduals(mb, leftMB *MB, block *MBData, tokenBR *bitio
 		var nzCoeffs uint32
 		for x := 0; x < 4; x++ {
 			ctx := int(l) + int(tnz&1)
-			nz := getCoeffs(tokenBR, acProba, ctx, q.Y1Mat, first, dst)
+			nz := getCoeffsInline(tokenBR, acProba, ctx, q.Y1Mat[0], q.Y1Mat[1], first, dst)
 			if nz > first {
 				l = 1
 			} else {
@@ -230,7 +364,7 @@ func (dec *Decoder) parseResiduals(mb, leftMB *MB, block *MBData, tokenBR *bitio
 			l := lnz & 1
 			for x := 0; x < 2; x++ {
 				ctx := int(l) + int(tnz&1)
-				nz := getCoeffs(tokenBR, bands[2], ctx, q.UVMat, 0, dst)
+				nz := getCoeffsInline(tokenBR, &bands[2], ctx, q.UVMat[0], q.UVMat[1], 0, dst)
 				if nz > 0 {
 					l = 1
 				} else {

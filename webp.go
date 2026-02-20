@@ -224,6 +224,10 @@ func decodeFrameForAnimation(bitstreamData, alphaData []byte) (*image.NRGBA, err
 	if nrgba, ok := img.(*image.NRGBA); ok {
 		return nrgba, nil
 	}
+	// Fast path for *image.YCbCr (lossy without alpha).
+	if ycbcr, ok := img.(*image.YCbCr); ok {
+		return ycbcrToNRGBA(ycbcr), nil
+	}
 	b := img.Bounds()
 	nrgba := image.NewNRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
 	for y := b.Min.Y; y < b.Max.Y; y++ {
@@ -234,12 +238,53 @@ func decodeFrameForAnimation(bitstreamData, alphaData []byte) (*image.NRGBA, err
 	return nrgba, nil
 }
 
-// decodeLossy decodes a VP8 lossy bitstream and returns an *image.NRGBA.
-// If alphaData is non-nil, the alpha plane is decoded and merged into the output.
-//
-// Chroma upsampling uses the diamond-shaped 4-tap kernel (FANCY_UPSAMPLING)
-// from the libwebp reference, processing luma rows in overlapping pairs to
-// interpolate between adjacent chroma rows.
+// ycbcrToNRGBA converts a 4:2:0 YCbCr image to NRGBA using direct
+// YCbCr→RGB conversion (no fancy upsampling, as animation compositing
+// doesn't require it).
+func ycbcrToNRGBA(ycbcr *image.YCbCr) *image.NRGBA {
+	w := ycbcr.Rect.Dx()
+	h := ycbcr.Rect.Dy()
+	nrgba := image.NewNRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		yi := y * ycbcr.YStride
+		ci := (y >> 1) * ycbcr.CStride
+		di := y * nrgba.Stride
+		for x := 0; x < w; x++ {
+			yy := int32(ycbcr.Y[yi+x])
+			cb := int32(ycbcr.Cb[ci+(x>>1)]) - 128
+			cr := int32(ycbcr.Cr[ci+(x>>1)]) - 128
+			r := yy + (91881*cr+32768)>>16
+			g := yy - (22554*cb+46802*cr+32768)>>16
+			b := yy + (116130*cb+32768)>>16
+			if r < 0 {
+				r = 0
+			} else if r > 255 {
+				r = 255
+			}
+			if g < 0 {
+				g = 0
+			} else if g > 255 {
+				g = 255
+			}
+			if b < 0 {
+				b = 0
+			} else if b > 255 {
+				b = 255
+			}
+			nrgba.Pix[di] = byte(r)
+			nrgba.Pix[di+1] = byte(g)
+			nrgba.Pix[di+2] = byte(b)
+			nrgba.Pix[di+3] = 255
+			di += 4
+		}
+	}
+	return nrgba
+}
+
+// decodeLossy decodes a VP8 lossy bitstream.
+// Without alpha data it returns *image.YCbCr (4:2:0) — no colour-space
+// conversion needed, just a plane copy.  With alpha it falls back to
+// *image.NRGBA using fancy chroma upsampling.
 func decodeLossy(data []byte, alphaData []byte) (image.Image, error) {
 	dec, width, height, yPlane, yStride, uPlane, vPlane, uvStride, err := lossy.DecodeFrame(data)
 	if err != nil {
@@ -256,14 +301,49 @@ func decodeLossy(data []byte, alphaData []byte) (image.Image, error) {
 		}
 	}
 
+	// Fast path: no alpha → return *image.YCbCr directly.
+	if alphaPlane == nil {
+		return buildYCbCr(width, height, yPlane, yStride, uPlane, vPlane, uvStride), nil
+	}
+
+	// Slow path: alpha present → NRGBA with fancy chroma upsampling.
+	return buildNRGBA(width, height, yPlane, yStride, uPlane, vPlane, uvStride, alphaPlane), nil
+}
+
+// buildYCbCr copies the decoder's Y/U/V cache planes into an image.YCbCr.
+// The decoder's slab is returned to the pool after this function, so the
+// data must be copied out.
+func buildYCbCr(width, height int, yPlane []byte, yStride int, uPlane, vPlane []byte, uvStride int) *image.YCbCr {
+	chromaH := (height + 1) / 2
+
+	yLen := height * yStride
+	cLen := chromaH * uvStride
+	buf := make([]byte, yLen+2*cLen)
+
+	copy(buf[:yLen], yPlane[:yLen])
+	copy(buf[yLen:yLen+cLen], uPlane[:cLen])
+	copy(buf[yLen+cLen:], vPlane[:cLen])
+
+	return &image.YCbCr{
+		Y:              buf[:yLen],
+		Cb:             buf[yLen : yLen+cLen],
+		Cr:             buf[yLen+cLen:],
+		YStride:        yStride,
+		CStride:        uvStride,
+		SubsampleRatio: image.YCbCrSubsampleRatio420,
+		Rect:           image.Rect(0, 0, width, height),
+	}
+}
+
+// buildNRGBA constructs an *image.NRGBA from raw YUV planes + alpha using
+// the diamond-shaped 4-tap fancy upsampler (FANCY_UPSAMPLING from libwebp).
+func buildNRGBA(width, height int, yPlane []byte, yStride int, uPlane, vPlane []byte, uvStride int, alphaPlane []byte) *image.NRGBA {
 	img := image.NewNRGBA(image.Rect(0, 0, width, height))
 
-	// Helper to get a luma row slice.
 	yRow := func(row int) []byte {
 		off := row * yStride
 		return yPlane[off : off+width]
 	}
-	// Helper to get a chroma row slice.
 	uRow := func(row int) []byte {
 		off := row * uvStride
 		return uPlane[off : off+(width+1)/2]
@@ -272,7 +352,6 @@ func decodeLossy(data []byte, alphaData []byte) (image.Image, error) {
 		off := row * uvStride
 		return vPlane[off : off+(width+1)/2]
 	}
-	// Helper to get an alpha row slice (may return nil).
 	aRow := func(row int) []byte {
 		if alphaPlane == nil {
 			return nil
@@ -280,45 +359,26 @@ func decodeLossy(data []byte, alphaData []byte) (image.Image, error) {
 		off := row * width
 		return alphaPlane[off : off+width]
 	}
-	// Helper to get an NRGBA destination row slice.
 	dstRow := func(row int) []byte {
 		off := row * img.Stride
 		return img.Pix[off : off+width*4]
 	}
 
-	// The fancy upsampler follows the libwebp EmitFancyRGB pattern:
-	//   1. Row 0 alone: mirror chroma (topU = botU = U[0])
-	//   2. Overlapping pairs (1,2), (3,4), ... with adjacent chroma rows
-	//   3. Last row alone if height is even: mirror chroma
-
 	if height == 1 {
-		// Single row: mirror chroma vertically.
 		dsp.UpsampleLinePairNRGBA(
-			yRow(0), nil,
-			uRow(0), vRow(0),
-			uRow(0), vRow(0),
-			dstRow(0), nil,
-			aRow(0), nil,
-			width,
+			yRow(0), nil, uRow(0), vRow(0), uRow(0), vRow(0),
+			dstRow(0), nil, aRow(0), nil, width,
 		)
-		return img, nil
+		return img
 	}
 
-	// Row 0: first row special case -- mirror chroma, only top output.
-	// We emit rows 0 and 1 together using U[0] as both top and bottom chroma,
-	// but that would not be correct for the diamond kernel. Instead, follow
-	// the C pattern exactly: row 0 alone with mirrored chroma.
+	// Row 0: mirror chroma.
 	dsp.UpsampleLinePairNRGBA(
-		yRow(0), nil,
-		uRow(0), vRow(0),
-		uRow(0), vRow(0),
-		dstRow(0), nil,
-		aRow(0), nil,
-		width,
+		yRow(0), nil, uRow(0), vRow(0), uRow(0), vRow(0),
+		dstRow(0), nil, aRow(0), nil, width,
 	)
 
-	// Overlapping pairs: (1,2), (3,4), (5,6), ...
-	// Each pair uses chroma rows (j, j+1) where j = lumaRow/2.
+	// Overlapping pairs.
 	y := 0
 	for y+2 < height {
 		chromaTop := y / 2
@@ -334,7 +394,7 @@ func decodeLossy(data []byte, alphaData []byte) (image.Image, error) {
 		y += 2
 	}
 
-	// Last row for even-height images: mirror chroma, only top output.
+	// Last row for even-height images.
 	if height&1 == 0 {
 		lastChroma := (height - 1) / 2
 		dsp.UpsampleLinePairNRGBA(
@@ -347,5 +407,5 @@ func decodeLossy(data []byte, alphaData []byte) (image.Image, error) {
 		)
 	}
 
-	return img, nil
+	return img
 }

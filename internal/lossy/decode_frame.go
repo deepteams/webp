@@ -541,44 +541,22 @@ func doSimpleFilter6(p []byte, off, step int) {
 	p[off+2*step] = clamp255(q2 - a3)
 }
 
-// Helper math for filters.
+// Helper math for filters — table-lookup implementations.
+// These replace branching versions with single array accesses
+// from the precomputed clip tables in dsp/cliptables.go.
 
 func abs(x int) int {
-	if x < 0 {
-		return -x
-	}
-	return x
+	return int(dsp.Kabs0(x))
 }
 
-// sclip1 clips v to [-128, 127] (matches C VP8ksclip1).
 func sclip1(v int) int {
-	if v < -128 {
-		return -128
-	}
-	if v > 127 {
-		return 127
-	}
-	return v
+	return int(dsp.Ksclip1(v))
 }
 
-// sclip2 clips v to [-16, 15] (matches C VP8ksclip2).
-// Used after the >>3 shift in DoFilter2 and DoFilter4.
 func sclip2(v int) int {
-	if v < -16 {
-		return -16
-	}
-	if v > 15 {
-		return 15
-	}
-	return v
+	return int(dsp.Ksclip2(v))
 }
 
 func clamp255(v int) byte {
-	if v < 0 {
-		return 0
-	}
-	if v > 255 {
-		return 255
-	}
-	return byte(v)
+	return dsp.Kclip1(v)
 }

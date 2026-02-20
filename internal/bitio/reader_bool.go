@@ -20,23 +20,27 @@ const boolBITS = 56
 // narrows it on every decoded symbol. A 64-bit value register caches up
 // to 56 look-ahead bits so that bulk byte loads are amortised over many
 // decoded symbols.
+//
+// Value, Range, and Bits are exported for manual GetBit inlining in
+// performance-critical coefficient decoding. Do not modify directly
+// unless following the exact GetBit arithmetic protocol.
 type BoolReader struct {
-	value  uint64 // current value register (BITS+8 bits active)
-	range_ uint32 // current range minus 1, kept in [127, 254]
-	bits   int    // number of valid bits remaining in value
-	buf    []byte // input byte buffer
-	pos    int    // current read position in buf
-	eof    bool   // true once input is exhausted
+	Value uint64 // current value register (BITS+8 bits active)
+	Range uint32 // current range minus 1, kept in [127, 254]
+	Bits  int    // number of valid bits remaining in value
+	buf   []byte // input byte buffer
+	pos   int    // current read position in buf
+	eof   bool   // true once input is exhausted
 }
 
 // NewBoolReader creates a BoolReader over the given byte slice and loads
 // the initial bits into the value register.
 func NewBoolReader(data []byte) *BoolReader {
 	br := &BoolReader{
-		range_: 255 - 1,
-		value:  0,
-		bits:   -8, // forces an immediate load of the first bytes
-		buf:    data,
+		Range: 255 - 1,
+		Value: 0,
+		Bits:  -8, // forces an immediate load of the first bytes
+		buf:   data,
 	}
 	br.loadNewBytes()
 	return br
@@ -54,27 +58,33 @@ func (br *BoolReader) loadNewBytes() {
 		in := binary.LittleEndian.Uint64(br.buf[br.pos:])
 		in = bits.ReverseBytes64(in)
 		in >>= 64 - boolBITS
-		br.value = in | (br.value << boolBITS)
+		br.Value = in | (br.Value << boolBITS)
 		br.pos += boolBITS >> 3
-		br.bits += boolBITS
+		br.Bits += boolBITS
 	} else {
 		br.loadFinalBytes()
 	}
+}
+
+// LoadNewBytes is the exported wrapper for loadNewBytes, used by
+// manually-inlined GetBit code in hot paths.
+func (br *BoolReader) LoadNewBytes() {
+	br.loadNewBytes()
 }
 
 // loadFinalBytes reads one byte at a time when the remaining buffer is too
 // short for a bulk load.
 func (br *BoolReader) loadFinalBytes() {
 	if br.pos < len(br.buf) {
-		br.bits += 8
-		br.value = uint64(br.buf[br.pos]) | (br.value << 8)
+		br.Bits += 8
+		br.Value = uint64(br.buf[br.pos]) | (br.Value << 8)
 		br.pos++
 	} else if !br.eof {
-		br.value <<= 8
-		br.bits += 8
+		br.Value <<= 8
+		br.Bits += 8
 		br.eof = true
 	} else {
-		br.bits = 0 // avoid undefined behaviour with shifts
+		br.Bits = 0 // avoid undefined behaviour with shifts
 	}
 }
 
@@ -85,20 +95,20 @@ func (br *BoolReader) loadFinalBytes() {
 func (br *BoolReader) GetBit(prob uint8) int {
 	// Cache range before potential byte load -- this ordering matters for
 	// performance even in Go.
-	range_ := br.range_
-	if br.bits < 0 {
+	range_ := br.Range
+	if br.Bits < 0 {
 		br.loadNewBytes()
 	}
 
-	pos := br.bits
+	pos := br.Bits
 	split := (range_ * uint32(prob)) >> 8
-	value := uint32(br.value >> uint(pos))
+	value := uint32(br.Value >> uint(pos))
 
 	var bit int
 	if value > split {
 		bit = 1
 		range_ -= split
-		br.value -= uint64(split+1) << uint(pos)
+		br.Value -= uint64(split+1) << uint(pos)
 	} else {
 		range_ = split + 1
 	}
@@ -107,9 +117,9 @@ func (br *BoolReader) GetBit(prob uint8) int {
 	// bits.Len32 returns floor(log2(x))+1, so subtract 1 to match BitsLog2Floor.
 	shift := 7 ^ (bits.Len32(range_) - 1)
 	range_ <<= uint(shift)
-	br.bits -= shift
+	br.Bits -= shift
 
-	br.range_ = range_ - 1
+	br.Range = range_ - 1
 	return bit
 }
 
@@ -117,19 +127,19 @@ func (br *BoolReader) GetBit(prob uint8) int {
 // bit-counting. This matches VP8GetBitAlt in libwebp and may be faster on
 // some platforms.
 func (br *BoolReader) GetBitAlt(prob uint8) int {
-	range_ := br.range_
-	if br.bits < 0 {
+	range_ := br.Range
+	if br.Bits < 0 {
 		br.loadNewBytes()
 	}
 
-	pos := br.bits
+	pos := br.Bits
 	split := (range_ * uint32(prob)) >> 8
-	value := uint32(br.value >> uint(pos))
+	value := uint32(br.Value >> uint(pos))
 
 	var bit int
 	if value > split {
 		range_ -= split + 1
-		br.value -= uint64(split+1) << uint(pos)
+		br.Value -= uint64(split+1) << uint(pos)
 		bit = 1
 	} else {
 		range_ = split
@@ -139,31 +149,31 @@ func (br *BoolReader) GetBitAlt(prob uint8) int {
 	if range_ <= 0x7e {
 		shift := int(kVP8Log2Range[range_])
 		range_ = uint32(kVP8NewRange[range_])
-		br.bits -= shift
+		br.Bits -= shift
 	}
 
-	br.range_ = range_
+	br.Range = range_
 	return bit
 }
 
 // GetSigned is a simplified version of GetBit for prob = 0x80.
 // It returns +v or -v depending on the decoded sign bit.
 func (br *BoolReader) GetSigned(v int) int {
-	if br.bits < 0 {
+	if br.Bits < 0 {
 		br.loadNewBytes()
 	}
 
-	pos := br.bits
-	split := br.range_ >> 1
-	value := uint32(br.value >> uint(pos))
+	pos := br.Bits
+	split := br.Range >> 1
+	value := uint32(br.Value >> uint(pos))
 
 	// mask is -1 when value >= split+1, 0 otherwise
 	mask := int32(split-value) >> 31
 
-	br.bits--
-	br.range_ += uint32(mask)
-	br.range_ |= 1
-	br.value -= uint64((split+1)&uint32(mask)) << uint(pos)
+	br.Bits--
+	br.Range += uint32(mask)
+	br.Range |= 1
+	br.Value -= uint64((split+1)&uint32(mask)) << uint(pos)
 
 	return (v ^ int(mask)) - int(mask)
 }

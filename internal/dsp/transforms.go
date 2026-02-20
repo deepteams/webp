@@ -33,35 +33,105 @@ func store(dst []byte, off, x int) {
 
 // transformOne performs a single 4x4 inverse DCT (TransformOne_C from dec.c).
 // in contains 16 coefficients, dst is the output with stride BPS.
+// Loops manually unrolled for performance (same pattern as iTransformOne).
 func transformOne(in []int16, dst []byte) {
 	_ = in[15]
 	_ = dst[3+3*BPS]
 
 	var tmp [4 * 4]int
 
-	// Vertical pass: process each column.
-	for i := 0; i < 4; i++ {
-		a := int(in[0+i]) + int(in[8+i])
-		b := int(in[0+i]) - int(in[8+i])
-		cc := mul2(int(in[4+i])) - mul1(int(in[12+i]))
-		d := mul1(int(in[4+i])) + mul2(int(in[12+i]))
-		tmp[0+i] = a + d
-		tmp[4+i] = b + cc
-		tmp[8+i] = b - cc
-		tmp[12+i] = a - d
+	// Vertical pass — column 0.
+	{
+		a := int(in[0]) + int(in[8])
+		b := int(in[0]) - int(in[8])
+		cc := mul2(int(in[4])) - mul1(int(in[12]))
+		d := mul1(int(in[4])) + mul2(int(in[12]))
+		tmp[0] = a + d
+		tmp[4] = b + cc
+		tmp[8] = b - cc
+		tmp[12] = a - d
+	}
+	// Column 1.
+	{
+		a := int(in[1]) + int(in[9])
+		b := int(in[1]) - int(in[9])
+		cc := mul2(int(in[5])) - mul1(int(in[13]))
+		d := mul1(int(in[5])) + mul2(int(in[13]))
+		tmp[1] = a + d
+		tmp[5] = b + cc
+		tmp[9] = b - cc
+		tmp[13] = a - d
+	}
+	// Column 2.
+	{
+		a := int(in[2]) + int(in[10])
+		b := int(in[2]) - int(in[10])
+		cc := mul2(int(in[6])) - mul1(int(in[14]))
+		d := mul1(int(in[6])) + mul2(int(in[14]))
+		tmp[2] = a + d
+		tmp[6] = b + cc
+		tmp[10] = b - cc
+		tmp[14] = a - d
+	}
+	// Column 3.
+	{
+		a := int(in[3]) + int(in[11])
+		b := int(in[3]) - int(in[11])
+		cc := mul2(int(in[7])) - mul1(int(in[15]))
+		d := mul1(int(in[7])) + mul2(int(in[15]))
+		tmp[3] = a + d
+		tmp[7] = b + cc
+		tmp[11] = b - cc
+		tmp[15] = a - d
 	}
 
-	// Horizontal pass: process each row.
-	for i := 0; i < 4; i++ {
-		dc := tmp[i*4+0] + 4 // rounding
-		a := dc + tmp[i*4+2]
-		b := dc - tmp[i*4+2]
-		cc := mul2(tmp[i*4+1]) - mul1(tmp[i*4+3])
-		d := mul1(tmp[i*4+1]) + mul2(tmp[i*4+3])
-		store(dst, 0+i*BPS, a+d)
-		store(dst, 1+i*BPS, b+cc)
-		store(dst, 2+i*BPS, b-cc)
-		store(dst, 3+i*BPS, a-d)
+	// Horizontal pass — row 0.
+	{
+		dc := tmp[0] + 4
+		a := dc + tmp[2]
+		b := dc - tmp[2]
+		cc := mul2(tmp[1]) - mul1(tmp[3])
+		d := mul1(tmp[1]) + mul2(tmp[3])
+		store(dst, 0, a+d)
+		store(dst, 1, b+cc)
+		store(dst, 2, b-cc)
+		store(dst, 3, a-d)
+	}
+	// Row 1.
+	{
+		dc := tmp[4] + 4
+		a := dc + tmp[6]
+		b := dc - tmp[6]
+		cc := mul2(tmp[5]) - mul1(tmp[7])
+		d := mul1(tmp[5]) + mul2(tmp[7])
+		store(dst, 0+BPS, a+d)
+		store(dst, 1+BPS, b+cc)
+		store(dst, 2+BPS, b-cc)
+		store(dst, 3+BPS, a-d)
+	}
+	// Row 2.
+	{
+		dc := tmp[8] + 4
+		a := dc + tmp[10]
+		b := dc - tmp[10]
+		cc := mul2(tmp[9]) - mul1(tmp[11])
+		d := mul1(tmp[9]) + mul2(tmp[11])
+		store(dst, 0+2*BPS, a+d)
+		store(dst, 1+2*BPS, b+cc)
+		store(dst, 2+2*BPS, b-cc)
+		store(dst, 3+2*BPS, a-d)
+	}
+	// Row 3.
+	{
+		dc := tmp[12] + 4
+		a := dc + tmp[14]
+		b := dc - tmp[14]
+		cc := mul2(tmp[13]) - mul1(tmp[15])
+		d := mul1(tmp[13]) + mul2(tmp[15])
+		store(dst, 0+3*BPS, a+d)
+		store(dst, 1+3*BPS, b+cc)
+		store(dst, 2+3*BPS, b-cc)
+		store(dst, 3+3*BPS, a-d)
 	}
 }
 
@@ -74,13 +144,25 @@ func transformTwo(in []int16, dst []byte, doTwo bool) {
 }
 
 // transformDC applies a DC-only inverse transform (all AC coefficients zero).
+// Manually unrolled for performance.
 func transformDC(in []int16, dst []byte) {
 	dc := int(in[0]) + 4
-	for j := 0; j < 4; j++ {
-		for i := 0; i < 4; i++ {
-			store(dst, i+j*BPS, dc)
-		}
-	}
+	store(dst, 0, dc)
+	store(dst, 1, dc)
+	store(dst, 2, dc)
+	store(dst, 3, dc)
+	store(dst, 0+BPS, dc)
+	store(dst, 1+BPS, dc)
+	store(dst, 2+BPS, dc)
+	store(dst, 3+BPS, dc)
+	store(dst, 0+2*BPS, dc)
+	store(dst, 1+2*BPS, dc)
+	store(dst, 2+2*BPS, dc)
+	store(dst, 3+2*BPS, dc)
+	store(dst, 0+3*BPS, dc)
+	store(dst, 1+3*BPS, dc)
+	store(dst, 2+3*BPS, dc)
+	store(dst, 3+3*BPS, dc)
 }
 
 // transformAC3 applies the inverse transform when only the first 3 coefficients
