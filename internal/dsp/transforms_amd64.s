@@ -160,46 +160,47 @@ TEXT ·transformWHTSSE2(SB), NOSPLIT, $0-48
 	PSHUFD $0xD8, X6, X2   // X2 = [frow2 | frow3]
 
 	// === Scatter store: each row's 4 values at stride 16 (32 bytes) ===
-	// Row 0: byte offsets 0, 32, 64, 96
-	MOVQ X0, AX
+	// Using PEXTRW to extract words directly from XMM registers,
+	// eliminating serial SHRQ dependency chains for better ILP.
+
+	// Row 0 (words 0-3 of X0): byte offsets 0, 32, 64, 96
+	PEXTRW $0, X0, AX
 	MOVW AX, 0(DI)
-	SHRQ $16, AX
+	PEXTRW $1, X0, AX
 	MOVW AX, 32(DI)
-	SHRQ $16, AX
+	PEXTRW $2, X0, AX
 	MOVW AX, 64(DI)
-	SHRQ $16, AX
+	PEXTRW $3, X0, AX
 	MOVW AX, 96(DI)
 
-	// Row 1: byte offsets 128, 160, 192, 224
-	PSHUFD $0x4E, X0, X0   // swap halves: frow1 now in low 64
-	MOVQ X0, AX
+	// Row 1 (words 4-7 of X0): byte offsets 128, 160, 192, 224
+	PEXTRW $4, X0, AX
 	MOVW AX, 128(DI)
-	SHRQ $16, AX
+	PEXTRW $5, X0, AX
 	MOVW AX, 160(DI)
-	SHRQ $16, AX
+	PEXTRW $6, X0, AX
 	MOVW AX, 192(DI)
-	SHRQ $16, AX
+	PEXTRW $7, X0, AX
 	MOVW AX, 224(DI)
 
-	// Row 2: byte offsets 256, 288, 320, 352
-	MOVQ X2, AX
+	// Row 2 (words 0-3 of X2): byte offsets 256, 288, 320, 352
+	PEXTRW $0, X2, AX
 	MOVW AX, 256(DI)
-	SHRQ $16, AX
+	PEXTRW $1, X2, AX
 	MOVW AX, 288(DI)
-	SHRQ $16, AX
+	PEXTRW $2, X2, AX
 	MOVW AX, 320(DI)
-	SHRQ $16, AX
+	PEXTRW $3, X2, AX
 	MOVW AX, 352(DI)
 
-	// Row 3: byte offsets 384, 416, 448, 480
-	PSHUFD $0x4E, X2, X2
-	MOVQ X2, AX
+	// Row 3 (words 4-7 of X2): byte offsets 384, 416, 448, 480
+	PEXTRW $4, X2, AX
 	MOVW AX, 384(DI)
-	SHRQ $16, AX
+	PEXTRW $5, X2, AX
 	MOVW AX, 416(DI)
-	SHRQ $16, AX
+	PEXTRW $6, X2, AX
 	MOVW AX, 448(DI)
-	SHRQ $16, AX
+	PEXTRW $7, X2, AX
 	MOVW AX, 480(DI)
 
 	RET
@@ -411,5 +412,201 @@ TEXT ·fTransformSSE2(SB), NOSPLIT, $0-72
 	PACKSSLW X12, X0            // X0 = [row2, row3]
 	MOVOU X6, 0(DX)
 	MOVOU X0, 16(DX)
+
+	RET
+
+// func iTransformOneSSE2(ref []byte, in []int16, dst []byte)
+// Inverse DCT 4x4 for encoder path. ref/dst stride=BPS=32.
+// SSE2 vectorized: widen int16→int32, vertical butterfly with mul1/mul2 via
+// PMULHW, transpose, horizontal butterfly, add ref, clip via PACKUSWB.
+// Constants: c1=20091, c2=35468 (as int16: 20091, -30068).
+// mul1(x) = PMULHW(x,c1) + x;  mul2(x) = PMULHW(x,c2_i16) + x.
+TEXT ·iTransformOneSSE2(SB), NOSPLIT, $0-72
+	MOVQ ref_base+0(FP), SI
+	MOVQ in_base+24(FP), DI
+	MOVQ dst_base+48(FP), DX
+
+	// Load 16 int16 coefficients as 4 rows (64 bits each).
+	MOVQ 0(DI), X0              // row0 = in[0..3]
+	MOVQ 8(DI), X1              // row1 = in[4..7]
+	MOVQ 16(DI), X2             // row2 = in[8..11]
+	MOVQ 24(DI), X3             // row3 = in[12..15]
+
+	// Broadcast mul constants: c1=20091, c2_i16=int16(35468)=-30068.
+	MOVQ $0x4E7B4E7B4E7B4E7B, AX  // 20091 = 0x4E7B, repeated 4 times
+	MOVQ AX, X12
+	MOVQ $0x8A8C8A8C8A8C8A8C, AX  // -30068 = 0x8A8C (int16), repeated
+	MOVQ AX, X13
+
+	// === Vertical pass (int16) ===
+	// a = row0 + row2, b = row0 - row2
+	MOVO X0, X4
+	PADDW X2, X4                // X4 = a = row0 + row2
+	MOVO X0, X5
+	PSUBW X2, X5                // X5 = b = row0 - row2
+
+	// mul1(row1) = PMULHW(row1, c1) + row1
+	MOVO X1, X6
+	PMULHW X12, X6              // (row1 * 20091) >> 16
+	PADDW X1, X6                // X6 = mul1(row1)
+
+	// mul2(row1) = PMULHW(row1, c2_i16) + row1
+	MOVO X1, X7
+	PMULHW X13, X7              // (row1 * -30068) >> 16
+	PADDW X1, X7                // X7 = mul2(row1)
+
+	// mul1(row3) = PMULHW(row3, c1) + row3
+	MOVO X3, X8
+	PMULHW X12, X8
+	PADDW X3, X8                // X8 = mul1(row3)
+
+	// mul2(row3) = PMULHW(row3, c2_i16) + row3
+	MOVO X3, X9
+	PMULHW X13, X9
+	PADDW X3, X9                // X9 = mul2(row3)
+
+	// cc = mul2(row1) - mul1(row3)
+	MOVO X7, X10
+	PSUBW X8, X10               // X10 = cc
+
+	// d = mul1(row1) + mul2(row3)
+	MOVO X6, X11
+	PADDW X9, X11               // X11 = d
+
+	// tmp0 = a + d, tmp1 = b + cc, tmp2 = b - cc, tmp3 = a - d
+	MOVO X4, X0
+	PADDW X11, X0               // X0 = tmp0 (int16)
+	MOVO X5, X1
+	PADDW X10, X1               // X1 = tmp1
+	MOVO X5, X2
+	PSUBW X10, X2               // X2 = tmp2
+	MOVO X4, X3
+	PSUBW X11, X3               // X3 = tmp3
+
+	// === Transpose 4x4 int16 (rows → columns) ===
+	// Input: X0=tmp0, X1=tmp1, X2=tmp2, X3=tmp3 (low 64 bits used)
+	MOVO X0, X4
+	PUNPCKLWL X1, X4            // [t0c0,t1c0, t0c1,t1c1, t0c2,t1c2, t0c3,t1c3]
+	MOVO X2, X5
+	PUNPCKLWL X3, X5            // [t2c0,t3c0, t2c1,t3c1, t2c2,t3c2, t2c3,t3c3]
+	MOVO X4, X6
+	MOVLHPS X5, X4              // [X4_low64, X5_low64]
+	MOVHLPS X6, X5              // [X6_high64, X5_high64]
+	PSHUFD $0xD8, X4, X0        // col0|col1
+	PSHUFD $0xD8, X5, X2        // col2|col3
+
+	// Unpack to individual column registers.
+	MOVO X0, X1
+	PSHUFD $0x4E, X0, X1        // X1 = col1|col0
+	// X0 low64 = col0, X1 low64 = col1 (from high64 of X0)
+	// X2 low64 = col2
+	MOVO X2, X3
+	PSHUFD $0x4E, X2, X3        // X3 = col3|col2
+
+	// === Horizontal pass (int16) ===
+	// Add bias +4 to col0 (dc).
+	MOVQ $0x0004000400040004, AX
+	MOVQ AX, X14
+	PADDW X14, X0               // col0 += 4
+
+	// a = dc + col2, b = dc - col2
+	MOVO X0, X4
+	PADDW X2, X4                // X4 = a
+	MOVO X0, X5
+	PSUBW X2, X5                // X5 = b
+
+	// mul1(col1) = PMULHW(col1, c1) + col1
+	MOVO X1, X6
+	PMULHW X12, X6
+	PADDW X1, X6                // X6 = mul1(col1)
+
+	// mul2(col1) = PMULHW(col1, c2_i16) + col1
+	MOVO X1, X7
+	PMULHW X13, X7
+	PADDW X1, X7                // X7 = mul2(col1)
+
+	// mul1(col3) = PMULHW(col3, c1) + col3
+	MOVO X3, X8
+	PMULHW X12, X8
+	PADDW X3, X8                // X8 = mul1(col3)
+
+	// mul2(col3) = PMULHW(col3, c2_i16) + col3
+	MOVO X3, X9
+	PMULHW X13, X9
+	PADDW X3, X9                // X9 = mul2(col3)
+
+	// cc = mul2(col1) - mul1(col3)
+	MOVO X7, X10
+	PSUBW X8, X10               // X10 = cc
+
+	// d = mul1(col1) + mul2(col3)
+	MOVO X6, X11
+	PADDW X9, X11               // X11 = d
+
+	// out0 = (a + d) >> 3, out1 = (b + cc) >> 3
+	// out2 = (b - cc) >> 3, out3 = (a - d) >> 3
+	MOVO X4, X0
+	PADDW X11, X0
+	PSRAW $3, X0                // X0 = out_col0
+
+	MOVO X5, X1
+	PADDW X10, X1
+	PSRAW $3, X1                // X1 = out_col1
+
+	MOVO X5, X2
+	PSUBW X10, X2
+	PSRAW $3, X2                // X2 = out_col2
+
+	MOVO X4, X3
+	PSUBW X11, X3
+	PSRAW $3, X3                // X3 = out_col3
+
+	// === Transpose back 4x4 int16 (columns → rows) ===
+	MOVO X0, X4
+	PUNPCKLWL X1, X4
+	MOVO X2, X5
+	PUNPCKLWL X3, X5
+	MOVO X4, X6
+	MOVLHPS X5, X4
+	MOVHLPS X6, X5
+	PSHUFD $0xD8, X4, X0        // row0|row1
+	PSHUFD $0xD8, X5, X2        // row2|row3
+
+	// === Add ref and clip to [0,255] ===
+	// Process each row individually: load ref, widen, add IDCT, pack, store.
+	// X0 = [row0 | row1], X2 = [row2 | row3]
+	PXOR X14, X14               // zero
+
+	// Row 0
+	MOVL (SI), X4               // ref row0 (4 bytes)
+	PUNPCKLBW X14, X4           // widen uint8→uint16
+	MOVO X0, X5
+	PADDW X4, X5                // row0 + ref_row0 (low 64 bits valid)
+	PACKUSWB X5, X5             // clip to [0,255]
+	MOVL X5, (DX)               // store dst row0
+
+	// Row 1
+	MOVL 32(SI), X4             // ref row1
+	PUNPCKLBW X14, X4
+	PSHUFD $0x4E, X0, X5        // bring row1 to low 64 bits
+	PADDW X4, X5
+	PACKUSWB X5, X5
+	MOVL X5, 32(DX)             // store dst row1
+
+	// Row 2
+	MOVL 64(SI), X4             // ref row2
+	PUNPCKLBW X14, X4
+	MOVO X2, X5
+	PADDW X4, X5
+	PACKUSWB X5, X5
+	MOVL X5, 64(DX)             // store dst row2
+
+	// Row 3
+	MOVL 96(SI), X4             // ref row3
+	PUNPCKLBW X14, X4
+	PSHUFD $0x4E, X2, X5        // bring row3 to low 64 bits
+	PADDW X4, X5
+	PACKUSWB X5, X5
+	MOVL X5, 96(DX)             // store dst row3
 
 	RET

@@ -309,10 +309,10 @@ func (dec *Decoder) doFilter(mbX, mbY int) {
 			simpleHFilter16iAt(dec.cacheY, yOff, yBPS, limit)
 		}
 		if mbY > 0 {
-			simpleVFilter16At(dec.cacheY, yOff, yBPS, limit+4)
+			dsp.SimpleVFilter16(dec.cacheY, yOff, yBPS, limit+4)
 		}
 		if finfo.FInner {
-			simpleVFilter16iAt(dec.cacheY, yOff, yBPS, limit)
+			dsp.SimpleVFilter16i(dec.cacheY, yOff, yBPS, limit)
 		}
 	} else {
 		// Complex filter (luma + chroma).
@@ -356,26 +356,6 @@ func fillBytes(dst []byte, v byte, n int) {
 // valid non-negative index within the buffer.
 // ---------------------------------------------------------------------------
 
-// simpleVFilter16At applies the simple 2-tap vertical filter at base offset.
-// Matches C SimpleVFilter16_C: uses thresh2 = 2*thresh+1, NeedsFilter, DoFilter2.
-func simpleVFilter16At(p []byte, base, bps, thresh int) {
-	thresh2 := 2*thresh + 1
-	for i := 0; i < 16; i++ {
-		off := base + i
-		p1 := int(p[off-2*bps])
-		p0 := int(p[off-bps])
-		q0 := int(p[off])
-		q1 := int(p[off+bps])
-		if 4*abs(p0-q0)+abs(p1-q1) <= thresh2 {
-			a := 3*(q0-p0) + sclip1(p1-q1)
-			a1 := sclip2((a + 4) >> 3)
-			a2 := sclip2((a + 3) >> 3)
-			p[off-bps] = clamp255(p0 + a2)
-			p[off] = clamp255(q0 - a1)
-		}
-	}
-}
-
 // simpleHFilter16At applies the simple 2-tap horizontal filter at base offset.
 func simpleHFilter16At(p []byte, base, bps, thresh int) {
 	thresh2 := 2*thresh + 1
@@ -392,13 +372,6 @@ func simpleHFilter16At(p []byte, base, bps, thresh int) {
 			p[off-1] = clamp255(p0 + a2)
 			p[off] = clamp255(q0 - a1)
 		}
-	}
-}
-
-// simpleVFilter16iAt applies the simple inner vertical filters at base offset.
-func simpleVFilter16iAt(p []byte, base, bps, thresh int) {
-	for k := 1; k <= 3; k++ {
-		simpleVFilter16At(p, base+k*4*bps, bps, thresh)
 	}
 }
 

@@ -2,13 +2,26 @@
 
 package dsp
 
-// FTransformDirect computes forward DCT using the pure Go implementation.
-// The DCT has complex rounding rules that don't vectorize cleanly.
+// FTransformDirect computes forward DCT using AVX2 when available, SSE2 otherwise.
 func FTransformDirect(src, ref []byte, out []int16) {
-	fTransform(src, ref, out)
+	if hasAVX2 {
+		fTransformAVX2(src, ref, out)
+		return
+	}
+	fTransformSSE2(src, ref, out)
 }
 
-// ITransformDirect computes inverse DCT using the pure Go implementation.
+// ITransformDirect computes inverse DCT using AVX2 when available, SSE2 otherwise.
 func ITransformDirect(ref []byte, in []int16, dst []byte, doTwo bool) {
-	iTransform(ref, in, dst, doTwo)
+	if hasAVX2 {
+		iTransformOneAVX2(ref, in, dst)
+		if doTwo {
+			iTransformOneAVX2(ref[4:], in[16:], dst[4:])
+		}
+		return
+	}
+	iTransformOneSSE2(ref, in, dst)
+	if doTwo {
+		iTransformOneSSE2(ref[4:], in[16:], dst[4:])
+	}
 }

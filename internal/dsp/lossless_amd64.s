@@ -22,6 +22,7 @@
 
 // func addGreenToBlueAndRedSSE2(argb []uint32, numPixels int)
 // Adds the green channel value to both red and blue channels for each pixel.
+// Unrolled to process 8 pixels (32 bytes) per iteration for better ILP.
 // Arguments (Plan9 ABI):
 //   argb_base+0(FP)   = pointer to []uint32 data
 //   argb_len+8(FP)    = slice length (unused)
@@ -39,31 +40,53 @@ TEXT ·addGreenToBlueAndRedSSE2(SB), NOSPLIT, $0-32
 	PCMPEQL X5, X5              // X5 = 0xFFFFFFFF x4
 	PSRLL   $24, X5             // X5 = 0x000000FF x4
 
-	// Process 4 pixels (16 bytes) per iteration.
+	// Process 8 pixels (32 bytes) per iteration.
 	MOVQ CX, DX
-	SHRQ $2, DX                 // DX = numPixels / 4
-	JZ   addgreen_tail          // fewer than 4 pixels, skip SSE loop
+	SHRQ $3, DX                 // DX = numPixels / 8
+	JZ   addgreen_tail4         // fewer than 8 pixels, try 4-pixel path
 
-addgreen_loop4:
-	MOVOU (SI), X0              // X0 = 4 pixels [B0,G0,R0,A0, B1,G1,R1,A1, ...]
-
-	// Extract green into byte 0 of each lane.
+addgreen_loop8:
+	// First 4 pixels.
+	MOVOU (SI), X0              // X0 = pixels 0-3
 	MOVO  X0, X1
-	PSRLL $8, X1                // X1 = [G,R,A,0] per pixel
-	PAND  X5, X1                // X1 = [G,0,0,0] per pixel
-
-	// Replicate green into byte 2 (red position).
+	PSRLL $8, X1
+	PAND  X5, X1
 	MOVO  X1, X2
-	PSLLL $16, X2               // X2 = [0,0,G,0] per pixel
-	POR   X2, X1                // X1 = [G,0,G,0] per pixel
+	PSLLL $16, X2
+	POR   X2, X1
+	PADDB X1, X0
+	MOVOU X0, (SI)
 
-	// Add green to blue and red channels (byte-wise, no cross-byte carry).
-	PADDB X1, X0                // X0 = [B+G, G+0, R+G, A+0] per pixel
+	// Second 4 pixels.
+	MOVOU 16(SI), X3            // X3 = pixels 4-7
+	MOVO  X3, X1
+	PSRLL $8, X1
+	PAND  X5, X1
+	MOVO  X1, X2
+	PSLLL $16, X2
+	POR   X2, X1
+	PADDB X1, X3
+	MOVOU X3, 16(SI)
 
-	MOVOU X0, (SI)              // store result
-	ADDQ  $16, SI               // advance pointer by 4 pixels
+	ADDQ  $32, SI               // advance pointer by 8 pixels
 	DECQ  DX
-	JNZ   addgreen_loop4
+	JNZ   addgreen_loop8
+
+addgreen_tail4:
+	// Check if 4 remaining pixels.
+	TESTQ $4, CX
+	JZ    addgreen_tail
+
+	MOVOU (SI), X0
+	MOVO  X0, X1
+	PSRLL $8, X1
+	PAND  X5, X1
+	MOVO  X1, X2
+	PSLLL $16, X2
+	POR   X2, X1
+	PADDB X1, X0
+	MOVOU X0, (SI)
+	ADDQ  $16, SI
 
 addgreen_tail:
 	// Handle remaining 0-3 pixels one at a time.
@@ -103,6 +126,7 @@ addgreen_done:
 
 // func subtractGreenSSE2(argb []uint32, numPixels int)
 // Subtracts the green channel value from both red and blue channels for each pixel.
+// Unrolled to process 8 pixels (32 bytes) per iteration for better ILP.
 // Arguments (Plan9 ABI):
 //   argb_base+0(FP)   = pointer to []uint32 data
 //   argb_len+8(FP)    = slice length (unused)
@@ -119,31 +143,53 @@ TEXT ·subtractGreenSSE2(SB), NOSPLIT, $0-32
 	PCMPEQL X5, X5              // X5 = 0xFFFFFFFF x4
 	PSRLL   $24, X5             // X5 = 0x000000FF x4
 
-	// Process 4 pixels per iteration.
+	// Process 8 pixels (32 bytes) per iteration.
 	MOVQ CX, DX
-	SHRQ $2, DX                 // DX = numPixels / 4
-	JZ   subgreen_tail
+	SHRQ $3, DX                 // DX = numPixels / 8
+	JZ   subgreen_tail4
 
-subgreen_loop4:
-	MOVOU (SI), X0              // X0 = 4 pixels
-
-	// Extract green into byte 0 of each lane.
+subgreen_loop8:
+	// First 4 pixels.
+	MOVOU (SI), X0              // X0 = pixels 0-3
 	MOVO  X0, X1
-	PSRLL $8, X1                // X1 = [G,R,A,0] per pixel
-	PAND  X5, X1                // X1 = [G,0,0,0] per pixel
-
-	// Replicate green into byte 2 (red position).
+	PSRLL $8, X1
+	PAND  X5, X1
 	MOVO  X1, X2
-	PSLLL $16, X2               // X2 = [0,0,G,0] per pixel
-	POR   X2, X1                // X1 = [G,0,G,0] per pixel
+	PSLLL $16, X2
+	POR   X2, X1
+	PSUBB X1, X0
+	MOVOU X0, (SI)
 
-	// Subtract green from blue and red channels (byte-wise).
-	PSUBB X1, X0                // X0 = [B-G, G-0, R-G, A-0] per pixel
+	// Second 4 pixels.
+	MOVOU 16(SI), X3            // X3 = pixels 4-7
+	MOVO  X3, X1
+	PSRLL $8, X1
+	PAND  X5, X1
+	MOVO  X1, X2
+	PSLLL $16, X2
+	POR   X2, X1
+	PSUBB X1, X3
+	MOVOU X3, 16(SI)
 
-	MOVOU X0, (SI)              // store result
-	ADDQ  $16, SI               // advance pointer by 4 pixels
+	ADDQ  $32, SI               // advance pointer by 8 pixels
 	DECQ  DX
-	JNZ   subgreen_loop4
+	JNZ   subgreen_loop8
+
+subgreen_tail4:
+	// Check if 4 remaining pixels.
+	TESTQ $4, CX
+	JZ    subgreen_tail
+
+	MOVOU (SI), X0
+	MOVO  X0, X1
+	PSRLL $8, X1
+	PAND  X5, X1
+	MOVO  X1, X2
+	PSLLL $16, X2
+	POR   X2, X1
+	PSUBB X1, X0
+	MOVOU X0, (SI)
+	ADDQ  $16, SI
 
 subgreen_tail:
 	// Handle remaining 0-3 pixels one at a time.

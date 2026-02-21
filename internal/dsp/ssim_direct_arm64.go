@@ -11,3 +11,9 @@ func SSE4x4Direct(pix, ref []byte) int {
 func SSE16x16Direct(pix, ref []byte) int {
 	return sse16x16NEON(pix, ref)
 }
+
+// TDisto4x4 computes perceptual Hadamard-domain distortion for a 4x4 block.
+func TDisto4x4(a, b []byte) int { return tDisto4x4Go(a, b) }
+
+// TDisto16x16 computes perceptual Hadamard-domain distortion for a 16x16 block.
+func TDisto16x16(a, b []byte) int { return tDisto16x16Go(a, b) }

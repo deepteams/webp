@@ -121,10 +121,13 @@ func UpsampleLinePair(
 	}
 }
 
-// UpsampleLinePairNRGBA is the same diamond 4-tap kernel as UpsampleLinePair
-// but writes into NRGBA pixel buffers (4 bytes per pixel: R, G, B, A=255).
-// alphaTop/alphaBot may be nil, in which case alpha is set to 255.
-func UpsampleLinePairNRGBA(
+// upsampleLinePairNRGBAGo is the pure Go reference implementation of the
+// diamond 4-tap kernel for NRGBA output. It writes into NRGBA pixel buffers
+// (4 bytes per pixel: R, G, B, A=255). alphaTop/alphaBot may be nil, in
+// which case alpha is set to 255.
+// The exported UpsampleLinePairNRGBA is defined in platform-specific dispatch
+// files (upsample_direct_*.go).
+func upsampleLinePairNRGBAGo(
 	topY, botY []byte,
 	topU, topV []byte,
 	botU, botV []byte,
