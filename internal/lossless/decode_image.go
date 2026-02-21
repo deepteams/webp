@@ -233,7 +233,17 @@ func (dec *Decoder) readHuffmanCodes(xsize, ysize, colorCacheBits int, allowRecu
 	// reading Huffman codes for ALL groups from the bitstream. Unmapped groups
 	// (mapping[i] == -1) are read but discarded to keep the bit reader in sync.
 	// We only allocate storage for the numHTreeGroups actually used.
-	htreeGroups := make([]HTreeGroup, numHTreeGroups)
+	var htreeGroups []HTreeGroup
+	if cap(dec.htreeGroupsBuf) >= numHTreeGroups {
+		htreeGroups = dec.htreeGroupsBuf[:numHTreeGroups]
+		// Zero out reused entries.
+		for i := range htreeGroups {
+			htreeGroups[i] = HTreeGroup{}
+		}
+	} else {
+		htreeGroups = make([]HTreeGroup, numHTreeGroups)
+		dec.htreeGroupsBuf = htreeGroups
+	}
 
 	for i := 0; i < numHTreeGroupsMax; i++ {
 		// Determine the destination index. If this group is unmapped
@@ -409,6 +419,13 @@ func readPackedSymbols(group *HTreeGroup, br *bitio.LosslessReader) (argb uint32
 // we track lastCached as the exact position of the last pixel inserted into
 // the color cache. Pending pixels (from lastCached to pos) are bulk-inserted
 // at end-of-row, before backward references, and before color cache lookups.
+//
+// Performance: readSymbolFromTree (cost 163) and getCopyDistance (cost 94)
+// exceed Go's inline budget (80). We manually inline them so that each
+// component call (FillBitWindow, PrefetchBits, ReadSymbol, SetBitPos, BitPos)
+// inlines individually, keeping hot state in registers. FillBitWindow calls
+// are reduced from 5 to 2 per literal pixel by exploiting the 64-bit val
+// register guarantee (≥32 bits after fill, each Huffman code ≤15 bits).
 func (dec *Decoder) decodeImageData(data []uint32, width, height, lastRow int) error {
 	br := dec.br
 	hdr := &dec.hdr
@@ -485,7 +502,12 @@ func (dec *Decoder) decodeImageData(data []uint32, width, height, lastRow int) e
 			}
 			code = gc
 		} else {
-			code = readSymbolFromTree(htreeGroup.HTrees[int(HuffGreen)], br)
+			// Inline readSymbolFromTree for green.
+			// FillBitWindow already called above — no redundant fill needed.
+			prefetch := br.PrefetchBits()
+			val, bits := ReadSymbol(htreeGroup.HTrees[int(HuffGreen)], prefetch)
+			br.SetBitPos(br.BitPos() + bits)
+			code = int(val)
 		}
 
 		// 8.7: EOS check after GREEN symbol (C has this at line 1259).
@@ -498,15 +520,31 @@ func (dec *Decoder) decodeImageData(data []uint32, width, height, lastRow int) e
 			if htreeGroup.IsTrivialLiteral {
 				data[pos] = htreeGroup.LiteralARB | (uint32(code) << 8)
 			} else {
-				red := readSymbolFromTree(htreeGroup.HTrees[int(HuffRed)], br)
+				// Inline readSymbolFromTree for red.
+				// After green (≤15 bits), ≥17 bits remain — no fill needed.
+				prefetch := br.PrefetchBits()
+				redVal, redBits := ReadSymbol(htreeGroup.HTrees[int(HuffRed)], prefetch)
+				br.SetBitPos(br.BitPos() + redBits)
+
+				// Fill before blue+alpha (green+red consumed ≤30 bits).
 				br.FillBitWindow()
-				blue := readSymbolFromTree(htreeGroup.HTrees[int(HuffBlue)], br)
-				alpha := readSymbolFromTree(htreeGroup.HTrees[int(HuffAlpha)], br)
+
+				// Inline readSymbolFromTree for blue.
+				prefetch = br.PrefetchBits()
+				blueVal, blueBits := ReadSymbol(htreeGroup.HTrees[int(HuffBlue)], prefetch)
+				br.SetBitPos(br.BitPos() + blueBits)
+
+				// Inline readSymbolFromTree for alpha.
+				// After blue (≤15 bits), ≥17 bits remain — no fill needed.
+				prefetch = br.PrefetchBits()
+				alphaVal, alphaBits := ReadSymbol(htreeGroup.HTrees[int(HuffAlpha)], prefetch)
+				br.SetBitPos(br.BitPos() + alphaBits)
+
 				// 8.7: Second EOS check after all symbols (C line 1269).
 				if br.IsEndOfStream() {
 					break
 				}
-				data[pos] = (uint32(alpha) << 24) | (uint32(red) << 16) | (uint32(code) << 8) | uint32(blue)
+				data[pos] = (uint32(alphaVal) << 24) | (uint32(redVal) << 16) | (uint32(code) << 8) | uint32(blueVal)
 			}
 			pos++
 			col++
@@ -524,10 +562,37 @@ func (dec *Decoder) decodeImageData(data []uint32, width, height, lastRow int) e
 		} else if code < lenCodeLimit {
 			// Backward reference (LZ77 copy).
 			lengthSym := code - NumLiteralCodes
-			length := getCopyLength(lengthSym, br)
-			distSymbol := readSymbolFromTree(htreeGroup.HTrees[int(HuffDist)], br)
+
+			// Inline getCopyLength (= getCopyDistance encoding).
+			var length int
+			if lengthSym < 4 {
+				length = lengthSym + 1
+			} else {
+				extraBits := (lengthSym - 2) >> 1
+				offset := (2 + (lengthSym & 1)) << extraBits
+				br.FillBitWindow()
+				length = offset + int(br.PrefetchBits()&uint32((1<<extraBits)-1)) + 1
+				br.SetBitPos(br.BitPos() + extraBits)
+			}
+
+			// Inline readSymbolFromTree for distance.
 			br.FillBitWindow()
-			distCode := getCopyDistance(distSymbol, br)
+			prefetch := br.PrefetchBits()
+			distVal, distBits := ReadSymbol(htreeGroup.HTrees[int(HuffDist)], prefetch)
+			br.SetBitPos(br.BitPos() + distBits)
+			distSymbol := int(distVal)
+
+			// Inline getCopyDistance.
+			var distCode int
+			if distSymbol < 4 {
+				distCode = distSymbol + 1
+			} else {
+				dExtraBits := (distSymbol - 2) >> 1
+				dOffset := (2 + (distSymbol & 1)) << dExtraBits
+				br.FillBitWindow()
+				distCode = dOffset + int(br.PrefetchBits()&uint32((1<<dExtraBits)-1)) + 1
+				br.SetBitPos(br.BitPos() + dExtraBits)
+			}
 			dist := PlaneCodeToDistance(width, distCode)
 
 			if br.IsEndOfStream() {
@@ -595,9 +660,33 @@ func (dec *Decoder) decodeImageData(data []uint32, width, height, lastRow int) e
 }
 
 // copyBlock32 copies 'length' uint32 values from data[pos-dist..] to data[pos..].
+// Optimized: non-overlapping uses copy() (SIMD memmove), dist==1 uses fill,
+// small overlapping dist uses a doubling copy pattern.
 func copyBlock32(data []uint32, pos, dist, length int) {
 	src := pos - dist
-	for i := 0; i < length; i++ {
-		data[pos+i] = data[src+i]
+	if dist >= length {
+		// Non-overlapping: use copy() which maps to runtime memmove (SIMD).
+		copy(data[pos:pos+length], data[src:src+length])
+	} else if dist == 1 {
+		// Single-value fill: repeated pixel.
+		val := data[src]
+		dst := data[pos : pos+length]
+		for i := range dst {
+			dst[i] = val
+		}
+	} else {
+		// Overlapping with dist > 1: doubling copy pattern.
+		// Copy the first 'dist' elements, then double the copied region
+		// until all elements are filled.
+		copy(data[pos:pos+dist], data[src:src+dist])
+		copied := dist
+		for copied < length {
+			n := copied
+			if n > length-copied {
+				n = length - copied
+			}
+			copy(data[pos+copied:pos+copied+n], data[pos:pos+n])
+			copied += n
+		}
 	}
 }

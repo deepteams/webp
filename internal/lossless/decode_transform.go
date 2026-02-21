@@ -321,16 +321,19 @@ func predictorInverseTransform(t *Transform, yStart, yEnd int, in, out []uint32)
 					x++
 				}
 			case 11: // Select
+				topLeftRow := out[outOff-width : outOff]
 				for ; x < xEnd; x++ {
-					outRow[x] = addPixels(inRow[x], selectPredictor(outRow[x-1], topRow[x], out[outOff+x-1-width]))
+					outRow[x] = addPixels(inRow[x], selectPredictor(outRow[x-1], topRow[x], topLeftRow[x-1]))
 				}
 			case 12: // Clamped add-subtract full
+				topLeftRow := out[outOff-width : outOff]
 				for ; x < xEnd; x++ {
-					outRow[x] = addPixels(inRow[x], clampedAddSubtractFull(outRow[x-1], topRow[x], out[outOff+x-1-width]))
+					outRow[x] = addPixels(inRow[x], clampedAddSubtractFull(outRow[x-1], topRow[x], topLeftRow[x-1]))
 				}
 			case 13: // Clamped add-subtract half
+				topLeftRow := out[outOff-width : outOff]
 				for ; x < xEnd; x++ {
-					outRow[x] = addPixels(inRow[x], clampedAddSubtractHalf(average2(outRow[x-1], topRow[x]), out[outOff+x-1-width]))
+					outRow[x] = addPixels(inRow[x], clampedAddSubtractHalf(average2(outRow[x-1], topRow[x]), topLeftRow[x-1]))
 				}
 			default: // Fallback (same as 0)
 				for ; x < xEnd; x++ {

@@ -88,6 +88,10 @@ type Decoder struct {
 	// Reusable scratch buffers for Huffman decoding.
 	codeLengthsBuf []int             // reusable buffer for readHuffmanCode
 	huffScratch    HuffmanTableScratch // slab allocator for Huffman tables
+
+	// Pooled buffers to reduce allocations across decode calls.
+	colorCacheBuf  []uint32    // reusable color cache backing array
+	htreeGroupsBuf []HTreeGroup // reusable HTreeGroup slice
 }
 
 // metadata holds the Huffman-related state for the current decode level.
@@ -231,10 +235,23 @@ func (dec *Decoder) decodeImageStream(xsize, ysize int, isLevel0 bool) error {
 		return err
 	}
 
-	// Set up color cache.
+	// Set up color cache, reusing pooled buffer when possible.
 	if colorCacheBits > 0 {
-		dec.hdr.colorCacheSize = 1 << colorCacheBits
-		dec.hdr.colorCache = NewColorCache(colorCacheBits)
+		size := 1 << colorCacheBits
+		dec.hdr.colorCacheSize = size
+		if cap(dec.colorCacheBuf) >= size {
+			dec.colorCacheBuf = dec.colorCacheBuf[:size]
+			for i := range dec.colorCacheBuf {
+				dec.colorCacheBuf[i] = 0
+			}
+		} else {
+			dec.colorCacheBuf = make([]uint32, size)
+		}
+		dec.hdr.colorCache = &ColorCache{
+			Colors:    dec.colorCacheBuf,
+			HashShift: 32 - colorCacheBits,
+			HashBits:  colorCacheBits,
+		}
 	} else {
 		dec.hdr.colorCacheSize = 0
 		dec.hdr.colorCache = nil
