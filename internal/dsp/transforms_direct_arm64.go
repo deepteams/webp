@@ -9,13 +9,9 @@ func FTransformDirect(src, ref []byte, out []int16) {
 	fTransform(src, ref, out)
 }
 
-// ITransformDirect computes inverse DCT using NEON assembly.
-// Unlike FTransform, NEON is faster for ITransform because the output is
-// byte-typed (UQXTN/SQXTUN pack efficiently) and the ref+residual addition
-// maps well to UADDW instructions.
+// ITransformDirect computes inverse DCT using the pure Go implementation.
+// NEON iTransformOneNEON has lower per-call latency but the two-call overhead
+// for doTwo=true and asm frame setup costs offset the gain in encoder workloads.
 func ITransformDirect(ref []byte, in []int16, dst []byte, doTwo bool) {
-	iTransformOneNEON(ref, in, dst)
-	if doTwo {
-		iTransformOneNEON(ref[4:], in[16:], dst[4:])
-	}
+	iTransform(ref, in, dst, doTwo)
 }
