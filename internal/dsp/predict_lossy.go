@@ -450,45 +450,10 @@ func PredLuma4Direct(mode int, dst []byte, off int) {
 	}
 }
 
-// PredLuma16Direct calls the 16x16 prediction function for the given mode directly.
-func PredLuma16Direct(mode int, dst []byte, off int) {
-	switch mode {
-	case 0:
-		dc16(dst, off)
-	case 1:
-		tm16(dst, off)
-	case 2:
-		ve16(dst, off)
-	case 3:
-		he16(dst, off)
-	case 4:
-		dc16NoTop(dst, off)
-	case 5:
-		dc16NoLeft(dst, off)
-	case 6:
-		dc16NoTopLeft(dst, off)
-	}
-}
-
-// PredChroma8Direct calls the 8x8 chroma prediction function for the given mode directly.
-func PredChroma8Direct(mode int, dst []byte, off int) {
-	switch mode {
-	case 0:
-		dc8uv(dst, off)
-	case 1:
-		tm8uv(dst, off)
-	case 2:
-		ve8uv(dst, off)
-	case 3:
-		he8uv(dst, off)
-	case 4:
-		dc8uvNoTop(dst, off)
-	case 5:
-		dc8uvNoLeft(dst, off)
-	case 6:
-		dc8uvNoTopLeft(dst, off)
-	}
-}
+// PredLuma16Direct and PredChroma8Direct are defined in platform-specific files:
+// - predict_lossy_direct_arm64.go (NEON assembly for modes 0-3)
+// - predict_lossy_direct_amd64.go (pure Go)
+// - predict_lossy_direct_noasm.go (pure Go fallback)
 
 // initPredictors assigns all prediction functions to the global arrays.
 func initPredictors() {

@@ -403,12 +403,9 @@ func (enc *VP8Encoder) encodeI16Residuals(it *MBIterator, info *MBEncInfo, seg *
 				// TrellisQuantizeBlock returns zigzag nzCount directly.
 				info.NzY[blockIdx] = uint8(nz)
 			} else {
+				// QuantizeCoeffs returns zigzag nzCount directly.
 				nz = QuantizeCoeffs(info.Coeffs[coeffOff:coeffOff+16], info.Coeffs[coeffOff:coeffOff+16], &seg.Y1, 1)
-				if nz == 0 {
-					info.NzY[blockIdx] = 0
-				} else {
-					info.NzY[blockIdx] = uint8(nzCount(info.Coeffs[coeffOff : coeffOff+16]))
-				}
+				info.NzY[blockIdx] = uint8(nz)
 			}
 			if nz > 0 {
 				nzY |= 1 << uint(blockIdx)
@@ -428,12 +425,11 @@ func (enc *VP8Encoder) encodeI16Residuals(it *MBIterator, info *MBEncInfo, seg *
 
 	// Quantize WHT output (stored at offset 256 = 16*16 in Coeffs).
 	// Note: libwebp does NOT trellis-quantize the WHT block, just normal quantize.
+	// QuantizeCoeffs returns zigzag nzCount directly.
 	nzDC := QuantizeCoeffs(whtOut[:], info.Coeffs[384:400], &seg.Y2, 0)
+	info.NzDC = uint8(nzDC)
 	if nzDC > 0 {
 		nzY |= 1 << 24 // flag for DC block
-		info.NzDC = uint8(nzCount(info.Coeffs[384:400]))
-	} else {
-		info.NzDC = 0
 	}
 
 	info.NonZeroY = nzY
@@ -479,12 +475,9 @@ func (enc *VP8Encoder) encodeI4Residuals(it *MBIterator, info *MBEncInfo, seg *S
 			dsp.FTransformDirect(srcY[srcOff:], predY[srcOff:], info.Coeffs[coeffOff:])
 
 			// Quantize all 16 coefficients (including DC at index 0).
+			// QuantizeCoeffs returns zigzag nzCount directly.
 			nz := QuantizeCoeffs(info.Coeffs[coeffOff:coeffOff+16], info.Coeffs[coeffOff:coeffOff+16], &seg.Y1, 0)
-			if nz == 0 {
-				info.NzY[blockIdx] = 0
-			} else {
-				info.NzY[blockIdx] = uint8(nzCount(info.Coeffs[coeffOff : coeffOff+16]))
-			}
+			info.NzY[blockIdx] = uint8(nz)
 			if nz > 0 {
 				nzY |= 1 << uint(blockIdx)
 				l = 1
@@ -623,14 +616,11 @@ func (enc *VP8Encoder) encodeUVResiduals(it *MBIterator, info *MBEncInfo, seg *S
 
 				// Note: UV trellis is disabled, matching C libwebp's DO_TRELLIS_UV=0
 				// ("Risky. Not worth.") to avoid chroma color bleeding.
+				// QuantizeCoeffs returns zigzag nzCount directly.
 				nz := QuantizeCoeffs(info.Coeffs[coeffOff:coeffOff+16], info.Coeffs[coeffOff:coeffOff+16], &seg.UV, 0)
 				// Store nzCount for collectAllStats reuse.
 				uvIdx := int(ch/2)*4 + blockIdx
-				if nz == 0 {
-					info.NzUV[uvIdx] = 0
-				} else {
-					info.NzUV[uvIdx] = uint8(nzCount(info.Coeffs[coeffOff : coeffOff+16]))
-				}
+				info.NzUV[uvIdx] = uint8(nz)
 				if nz > 0 {
 					nzUV |= 1 << uint(ch/2*4+uint(blockIdx))
 					l = 1
@@ -858,18 +848,6 @@ func (enc *VP8Encoder) updateNZContext(it *MBIterator, info *MBEncInfo) {
 
 	enc.topNz[it.X] = outTNz
 	enc.leftNz = outLNz
-}
-
-// nzCount returns the number of non-zero coefficients in a block.
-func nzCount(coeffs []int16) int {
-	last := 0
-	for n := 15; n >= 0; n-- {
-		if coeffs[KZigzag[n]] != 0 {
-			last = n + 1
-			break
-		}
-	}
-	return last
 }
 
 // reconstructMB applies inverse transforms to reconstruct the macroblock

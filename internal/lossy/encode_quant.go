@@ -2,17 +2,23 @@ package lossy
 
 import "github.com/deepteams/webp/internal/dsp"
 
-// QuantizeCoeffs quantizes a 4x4 coefficient block and returns the position
-// after the last non-zero coefficient (0 if all zero).
+// kReverseZigzag maps raster-order coefficient position to zigzag scan position.
+// Used by QuantizeCoeffs to compute zigzag nzCount in a single pass.
+var kReverseZigzag = [16]int{0, 1, 5, 6, 2, 4, 7, 12, 3, 8, 11, 13, 9, 10, 14, 15}
+
+// quantizeCoeffsGo is the pure-Go reference implementation of QuantizeCoeffs.
+// Quantizes a 4x4 coefficient block and returns the zigzag-order
+// nzCount: the position after the last non-zero coefficient in zigzag scan order
+// (0 if all zero). This eliminates the need for a separate nzCount backward scan.
 // firstCoeff is the starting coefficient index (0 for all, 1 to skip DC).
 // Coefficient 0 (DC) uses DCIQuant/DCBias, coefficients 1-15 (AC) use IQuant/Bias.
 // Uses QFIX=17 QUANTDIV: level = (coeff * iQ + bias) >> 17.
-func QuantizeCoeffs(in, out []int16, sq *SegmentQuant, firstCoeff int) int {
+func quantizeCoeffsGo(in, out []int16, sq *SegmentQuant, firstCoeff int) int {
 	// BCE hints: prove to compiler that all accesses are in-bounds.
 	_ = in[15]
 	_ = out[15]
 
-	last := -1
+	maxZZ := -1
 
 	// Handle DC coefficient separately to avoid branch in hot AC loop.
 	if firstCoeff == 0 {
@@ -32,15 +38,15 @@ func QuantizeCoeffs(in, out []int16, sq *SegmentQuant, firstCoeff int) int {
 		}
 		out[0] = int16(sign * coeff)
 		if coeff != 0 {
-			last = 0
+			maxZZ = 0 // DC is zigzag position 0
 		}
 	} else {
 		out[0] = 0
 	}
 
 	// AC coefficients (1-15) — loop with hoisted constants.
-	// The loop counter overhead is minimal; the key optimization is hoisting
-	// IQuant/Bias/Sharpen access outside the branch.
+	// Track max zigzag position of non-zero coefficients inline to avoid
+	// a separate backward zigzag scan (saves ~16 iterations per block).
 	iq := uint32(sq.IQuant)
 	bias := uint32(sq.Bias)
 	for n := 1; n < 16; n++ {
@@ -60,16 +66,19 @@ func QuantizeCoeffs(in, out []int16, sq *SegmentQuant, firstCoeff int) int {
 		}
 		out[n] = int16(sign * coeff)
 		if coeff != 0 {
-			last = n
+			if zz := kReverseZigzag[n]; zz > maxZZ {
+				maxZZ = zz
+			}
 		}
 	}
-	return last + 1
+	return maxZZ + 1
 }
 
-// DequantCoeffs dequantizes a coefficient block using the segment quantizer.
+// dequantCoeffsGo is the pure-Go reference implementation of DequantCoeffs.
+// Dequantizes a coefficient block using the segment quantizer.
 // Coefficient 0 (DC) uses DCQuant, coefficients 1-15 (AC) use Quant.
 // Fully unrolled for performance.
-func DequantCoeffs(in, out []int16, sq *SegmentQuant) {
+func dequantCoeffsGo(in, out []int16, sq *SegmentQuant) {
 	_ = in[15]
 	_ = out[15]
 	q := sq.Quant
@@ -152,31 +161,23 @@ func computeOneLevelCost(probas *[NumProbas]uint8, costs *LevelCost) {
 
 // TokenCostForCoeffs computes the approximate rate for a quantized coefficient block.
 // coeffs has up to 16 entries in raster order (matching our QuantizeCoeffs output).
-// nz is non-zero if the block has any non-zero coefficients (0 means all zeros).
+// nzCount is the zigzag-order position after the last non-zero coefficient
+// (as returned by QuantizeCoeffs or TrellisQuantizeBlock). 0 means all zeros.
 // Coefficients are read in zigzag order to match the actual encoding order.
 // ctx0 is the initial NZ context (0, 1, or 2) from neighboring blocks.
 // first is the first coefficient position to scan (0 for full blocks, 1 for I16-AC
 // where the DC coefficient is handled separately via WHT).
-func TokenCostForCoeffs(coeffs []int16, nz int, ctxType int, proba *Proba, ctx0 int, first int) int {
+func TokenCostForCoeffs(coeffs []int16, nzCount int, ctxType int, proba *Proba, ctx0 int, first int) int {
 	_ = coeffs[15] // BCE hint
 	ecost := &dsp.VP8EntropyCost
-	if nz == 0 {
+	if nzCount <= first {
 		p := proba.BandsPtr[ctxType][first]
 		return int(ecost[p.Probas[ctx0][0]])
 	}
 
-	// Find last non-zero coefficient in zigzag scan order.
-	last := -1
-	for n := 15; n >= first; n-- {
-		if coeffs[KZigzag[n]] != 0 {
-			last = n
-			break
-		}
-	}
-	if last < 0 {
-		p := proba.BandsPtr[ctxType][first]
-		return int(ecost[p.Probas[ctx0][0]])
-	}
+	// Use pre-computed nzCount to determine last non-zero zigzag position,
+	// avoiding the backward scan that previously iterated up to 16 positions.
+	last := nzCount - 1
 
 	cost := 0
 	ctx := ctx0
@@ -202,10 +203,14 @@ func TokenCostForCoeffs(coeffs []int16, nz int, ctxType int, proba *Proba, ctx0 
 			ctx = 0
 		} else {
 			cost += int(ecost[255-pp[1]]) // non-zero
-			cost += int(dsp.VP8LevelFixedCosts[v]) + variableLevelCost(v, pp)
 			if v == 1 {
+				cost += int(dsp.VP8LevelFixedCosts[1]) + int(ecost[pp[2]])
 				ctx = 1
+			} else if v == 2 {
+				cost += int(dsp.VP8LevelFixedCosts[2]) + int(ecost[255-pp[2]]) + int(ecost[pp[3]]) + int(ecost[pp[4]])
+				ctx = 2
 			} else {
+				cost += int(dsp.VP8LevelFixedCosts[v]) + variableLevelCost(v, pp)
 				ctx = 2
 			}
 		}

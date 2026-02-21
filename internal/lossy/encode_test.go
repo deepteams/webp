@@ -3,6 +3,7 @@ package lossy
 import (
 	"image"
 	"image/color"
+	"math/rand"
 	"testing"
 )
 
@@ -206,6 +207,153 @@ func TestDequantCoeffs(t *testing.T) {
 	}
 	if out[1] != -50 {
 		t.Errorf("out[1] = %d, want -50", out[1])
+	}
+}
+
+func TestDequantCoeffsConformance(t *testing.T) {
+	rng := rand.New(rand.NewSource(42))
+	for iter := 0; iter < 1000; iter++ {
+		in := [16]int16{}
+		for i := range in {
+			in[i] = int16(rng.Intn(4096) - 2048)
+		}
+		sq := SegmentQuant{
+			Quant:   rng.Intn(127) + 1,
+			DCQuant: rng.Intn(127) + 1,
+		}
+		goOut := [16]int16{}
+		dispOut := [16]int16{}
+		dequantCoeffsGo(in[:], goOut[:], &sq)
+		DequantCoeffs(in[:], dispOut[:], &sq)
+		for i := 0; i < 16; i++ {
+			if goOut[i] != dispOut[i] {
+				t.Fatalf("iter %d, index %d: Go=%d dispatch=%d (q=%d dcq=%d in[%d]=%d)",
+					iter, i, goOut[i], dispOut[i], sq.Quant, sq.DCQuant, i, in[i])
+			}
+		}
+	}
+}
+
+func BenchmarkDequantCoeffsGo(b *testing.B) {
+	in := [16]int16{100, -50, 30, 20, -10, 5, 3, -2, 1, 0, 0, 0, 0, 0, 0, 0}
+	out := [16]int16{}
+	sq := SegmentQuant{Quant: 10, DCQuant: 16}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		dequantCoeffsGo(in[:], out[:], &sq)
+	}
+}
+
+func BenchmarkDequantCoeffsDispatch(b *testing.B) {
+	in := [16]int16{100, -50, 30, 20, -10, 5, 3, -2, 1, 0, 0, 0, 0, 0, 0, 0}
+	out := [16]int16{}
+	sq := SegmentQuant{Quant: 10, DCQuant: 16}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		DequantCoeffs(in[:], out[:], &sq)
+	}
+}
+
+func TestQuantizeCoeffsConformance(t *testing.T) {
+	rng := rand.New(rand.NewSource(43))
+	for iter := 0; iter < 1000; iter++ {
+		in := [16]int16{}
+		for i := range in {
+			in[i] = int16(rng.Intn(4096) - 2048)
+		}
+		sq := SegmentQuant{
+			Quant:    rng.Intn(127) + 1,
+			IQuant:   (1 << 17) / (rng.Intn(127) + 1),
+			Bias:     rng.Intn(131072),
+			DCQuant:  rng.Intn(127) + 1,
+			DCIQuant: (1 << 17) / (rng.Intn(127) + 1),
+			DCBias:   rng.Intn(131072),
+		}
+		for i := range sq.Sharpen {
+			sq.Sharpen[i] = int16(rng.Intn(100))
+		}
+		firstCoeff := rng.Intn(2) // 0 or 1
+
+		goOut := [16]int16{}
+		dispOut := [16]int16{}
+		goNZ := quantizeCoeffsGo(in[:], goOut[:], &sq, firstCoeff)
+		dispNZ := QuantizeCoeffs(in[:], dispOut[:], &sq, firstCoeff)
+
+		if goNZ != dispNZ {
+			t.Fatalf("iter %d: nzCount Go=%d dispatch=%d (firstCoeff=%d)", iter, goNZ, dispNZ, firstCoeff)
+		}
+		for i := 0; i < 16; i++ {
+			if goOut[i] != dispOut[i] {
+				t.Fatalf("iter %d, coeff[%d]: Go=%d dispatch=%d (in=%d, firstCoeff=%d)",
+					iter, i, goOut[i], dispOut[i], in[i], firstCoeff)
+			}
+		}
+	}
+}
+
+func TestQuantizeCoeffsConformanceInPlace(t *testing.T) {
+	// Test with in == out (same slice), matching encoder usage pattern.
+	rng := rand.New(rand.NewSource(44))
+	for iter := 0; iter < 500; iter++ {
+		in := [16]int16{}
+		for i := range in {
+			in[i] = int16(rng.Intn(4096) - 2048)
+		}
+		sq := SegmentQuant{
+			Quant:    rng.Intn(127) + 1,
+			IQuant:   (1 << 17) / (rng.Intn(127) + 1),
+			Bias:     rng.Intn(131072),
+			DCQuant:  rng.Intn(127) + 1,
+			DCIQuant: (1 << 17) / (rng.Intn(127) + 1),
+			DCBias:   rng.Intn(131072),
+		}
+		for i := range sq.Sharpen {
+			sq.Sharpen[i] = int16(rng.Intn(100))
+		}
+		firstCoeff := rng.Intn(2)
+
+		// Reference: separate in/out.
+		refOut := [16]int16{}
+		refNZ := quantizeCoeffsGo(in[:], refOut[:], &sq, firstCoeff)
+
+		// Dispatch: in-place (in == out).
+		inPlace := in // copy
+		dispNZ := QuantizeCoeffs(inPlace[:], inPlace[:], &sq, firstCoeff)
+
+		if refNZ != dispNZ {
+			t.Fatalf("iter %d: nzCount ref=%d dispatch=%d", iter, refNZ, dispNZ)
+		}
+		for i := 0; i < 16; i++ {
+			if refOut[i] != inPlace[i] {
+				t.Fatalf("iter %d, coeff[%d]: ref=%d inplace=%d", iter, i, refOut[i], inPlace[i])
+			}
+		}
+	}
+}
+
+func BenchmarkQuantizeCoeffsGo(b *testing.B) {
+	in := [16]int16{100, -50, 25, 10, -5, 3, -2, 1, 0, 0, 0, 0, 0, 0, 0, 0}
+	out := [16]int16{}
+	sq := SegmentQuant{
+		Quant: 10, IQuant: (1 << 17) / 10, Bias: 110 << 9,
+		DCQuant: 10, DCIQuant: (1 << 17) / 10, DCBias: 96 << 9,
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		quantizeCoeffsGo(in[:], out[:], &sq, 0)
+	}
+}
+
+func BenchmarkQuantizeCoeffsDispatch(b *testing.B) {
+	in := [16]int16{100, -50, 25, 10, -5, 3, -2, 1, 0, 0, 0, 0, 0, 0, 0, 0}
+	out := [16]int16{}
+	sq := SegmentQuant{
+		Quant: 10, IQuant: (1 << 17) / 10, Bias: 110 << 9,
+		DCQuant: 10, DCIQuant: (1 << 17) / 10, DCBias: 96 << 9,
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		QuantizeCoeffs(in[:], out[:], &sq, 0)
 	}
 }
 
