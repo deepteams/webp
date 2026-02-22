@@ -464,7 +464,10 @@ func decodeAnimated(data []byte, inputPath, outputPath string, feat *webp.Featur
 		return fmt.Errorf("dec: decoding frames: %w", err)
 	}
 
-	dec := animation.NewAnimDecoder(anim)
+	dec, err := animation.NewAnimDecoder(anim)
+	if err != nil {
+		return fmt.Errorf("dec: %w", err)
+	}
 	g := &gif.GIF{
 		LoopCount: anim.LoopCount,
 	}

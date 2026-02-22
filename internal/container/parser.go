@@ -276,6 +276,9 @@ func (p *Parser) parseVP8XChunks(buf []byte) error {
 			if len(p.chunks) >= MaxChunks {
 				return fmt.Errorf("%w: too many chunks (max %d)", ErrInvalidChunk, MaxChunks)
 			}
+			if payloadSize > MaxMetadataSize {
+				return fmt.Errorf("%w: unknown chunk %s too large (%d bytes, max %d)", ErrInvalidChunk, FourCCString(fourcc), payloadSize, MaxMetadataSize)
+			}
 			p.chunks = append(p.chunks, Chunk{FourCC: fourcc, Payload: copyBytes(payload)})
 		}
 

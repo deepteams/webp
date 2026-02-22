@@ -44,6 +44,13 @@ func DecodeAlpha(data []byte, width, height int) ([]byte, error) {
 	if len(data) < 1 {
 		return nil, fmt.Errorf("alpha: empty data")
 	}
+	if width <= 0 || height <= 0 {
+		return nil, fmt.Errorf("alpha: invalid dimensions %dx%d", width, height)
+	}
+	area := uint64(width) * uint64(height)
+	if area > 1<<30 {
+		return nil, fmt.Errorf("alpha: plane too large (%dx%d = %d pixels)", width, height, area)
+	}
 
 	// Parse the 1-byte alpha header.
 	header := data[0]
@@ -52,7 +59,7 @@ func DecodeAlpha(data []byte, width, height int) ([]byte, error) {
 	_ = (header >> 4) & 0x03 // pre-processing (unused in decode)
 
 	payload := data[1:]
-	planeSize := width * height
+	planeSize := int(area)
 
 	var raw []byte
 

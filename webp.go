@@ -50,25 +50,45 @@ type Features struct {
 	FrameCount   int    // Number of frames (1 for still images).
 }
 
+// MaxInputSize is the maximum allowed input size for WebP decoding (256 MB).
+// Inputs larger than this are rejected to prevent denial-of-service via
+// excessive memory allocation.
+const MaxInputSize = 256 * 1024 * 1024
+
 // readAll reads all data from r. If r implements Len() int (e.g.
 // *bytes.Reader), a single exact-sized allocation is used instead of
 // the repeated doublings that io.ReadAll performs.
+// Inputs exceeding MaxInputSize are rejected.
 func readAll(r io.Reader) ([]byte, error) {
+	// Check Len() before wrapping with LimitReader (which hides it).
 	if lr, ok := r.(interface{ Len() int }); ok {
 		n := lr.Len()
+		if n > MaxInputSize {
+			return nil, fmt.Errorf("webp: input too large (%d bytes, max %d)", n, MaxInputSize)
+		}
 		if n > 0 {
 			data := make([]byte, n)
 			_, err := io.ReadFull(r, data)
 			return data, err
 		}
 	}
-	return io.ReadAll(r)
+	data, err := io.ReadAll(io.LimitReader(r, MaxInputSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > MaxInputSize {
+		return nil, fmt.Errorf("webp: input too large (exceeds %d bytes)", MaxInputSize)
+	}
+	return data, err
 }
 
 // Decode reads a WebP image from r and returns it as an image.Image.
 // For lossless images the returned type is *image.NRGBA.
 // For lossy images the returned type is *image.YCbCr (when available) or *image.NRGBA.
 func Decode(r io.Reader) (image.Image, error) {
+	if r == nil {
+		return nil, errors.New("webp: nil reader")
+	}
 	data, err := readAll(r)
 	if err != nil {
 		return nil, fmt.Errorf("webp: reading data: %w", err)
@@ -79,6 +99,9 @@ func Decode(r io.Reader) (image.Image, error) {
 // DecodeConfig returns the color model and dimensions of a WebP image
 // without decoding the entire image.
 func DecodeConfig(r io.Reader) (image.Config, error) {
+	if r == nil {
+		return image.Config{}, errors.New("webp: nil reader")
+	}
 	data, err := readAll(r)
 	if err != nil {
 		return image.Config{}, fmt.Errorf("webp: reading data: %w", err)
@@ -115,6 +138,9 @@ func DecodeConfig(r io.Reader) (image.Config, error) {
 // without decoding pixel data. It parses just the RIFF container and chunk
 // headers, making it much cheaper than a full [Decode].
 func GetFeatures(r io.Reader) (*Features, error) {
+	if r == nil {
+		return nil, errors.New("webp: nil reader")
+	}
 	data, err := readAll(r)
 	if err != nil {
 		return nil, fmt.Errorf("webp: reading data: %w", err)
@@ -327,6 +353,10 @@ func buildYCbCr(width, height int, yPlane []byte, yStride int, uPlane, vPlane []
 
 	yLen := height * yStride
 	cLen := chromaH * uvStride
+	totalSize := uint64(yLen) + 2*uint64(cLen)
+	if totalSize > 1<<30 {
+		return nil
+	}
 	buf := make([]byte, yLen+2*cLen)
 
 	copy(buf[:yLen], yPlane[:yLen])

@@ -360,7 +360,7 @@ func ReadSymbol(table []HuffmanCode, prefetchBits uint32) (value uint16, bitsUse
 		prefetchBits >>= HuffmanTableBits
 		idx := int(entry.Value) + int(prefetchBits&((1<<nbits)-1))
 		if idx >= len(table) {
-			return 0, HuffmanTableBits
+			return 0, -1 // sentinel: invalid table index
 		}
 		entry = table[idx]
 		bitsUsed += int(entry.Bits)

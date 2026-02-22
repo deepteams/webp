@@ -169,6 +169,9 @@ func ReadChunk(r io.Reader) (Chunk, error) {
 	if payloadSize > MaxChunkPayload {
 		return Chunk{}, ErrTooLarge
 	}
+	if payloadSize > uint32(MaxReadChunkSize) {
+		return Chunk{}, fmt.Errorf("webp: chunk too large for streaming (%d bytes, max %d)", payloadSize, MaxReadChunkSize)
+	}
 
 	padded := PaddedSize(payloadSize)
 	payload := make([]byte, padded)

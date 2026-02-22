@@ -419,6 +419,12 @@ func resolveAlphaQuality(v int) int {
 // If opts is nil, DefaultOptions() is used.
 // Returns an error if opts contains invalid parameter values.
 func Encode(w io.Writer, img image.Image, opts *EncoderOptions) error {
+	if w == nil {
+		return fmt.Errorf("webp: nil writer")
+	}
+	if img == nil {
+		return fmt.Errorf("webp: nil image")
+	}
 	if opts == nil {
 		opts = DefaultOptions()
 	}
@@ -739,7 +745,8 @@ func encodeLosslessToWriter(w io.Writer, img image.Image, opts *EncoderOptions) 
 	fourcc := container.FourCCVP8L
 	err := lossless.EncodeToWriter(argb, width, height, lcfg, w,
 		func(bitstreamSize int) error {
-			argbPool.Put(ab)
+			// Note: argbPool.Put(ab) moved after EncodeToWriter returns
+			// to avoid use-after-pool-put (V7 security fix).
 			// Write simple RIFF/WEBP header directly to w.
 			payloadSize := uint32(bitstreamSize)
 			paddedPayload := payloadSize + (payloadSize & 1)
@@ -753,6 +760,7 @@ func encodeLosslessToWriter(w io.Writer, img image.Image, opts *EncoderOptions) 
 			_, err := w.Write(hdr[:])
 			return err
 		})
+	argbPool.Put(ab) // Return buffer to pool after encoder is done with argb.
 	if err != nil {
 		return fmt.Errorf("webp: lossless encode: %w", err)
 	}

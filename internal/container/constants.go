@@ -93,11 +93,12 @@ const (
 // Limits.
 const (
 	MaxCanvasSize    = 1 << 24         // 24-bit max for VP8X width/height
-	MaxImageArea     = uint64(1) << 32 // 32-bit max for width x height
+	MaxImageArea     = uint64(1) << 30 // ~1 billion pixels, ~4GB NRGBA max
 	MaxLoopCount     = 1 << 16
 	MaxDuration      = 1 << 24
 	MaxPositionOff   = 1 << 24
 	MaxChunkPayload  = ^uint32(0) - ChunkHeaderSize - 1
+	MaxReadChunkSize = 256 * 1024 * 1024 // 256MB practical limit for streaming ReadChunk
 	MaxFrames        = 10000
 	MaxChunks        = 1000
 	MaxMetadataSize  = 100 * 1024 * 1024 // 100MB

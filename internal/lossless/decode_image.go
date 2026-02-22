@@ -409,11 +409,14 @@ func getCopyLength(lengthSymbol int, br *bitio.LosslessReader) int {
 // bit reader, performing the necessary fill/prefetch.
 // Uses concrete *bitio.LosslessReader so FillBitWindow/PrefetchBits/
 // SetBitPos/BitPos can inline (avoiding interface dispatch overhead).
-func readSymbolFromTree(table []HuffmanCode, br *bitio.LosslessReader) int {
+func readSymbolFromTree(table []HuffmanCode, br *bitio.LosslessReader) (int, bool) {
 	br.FillBitWindow()
 	val, bitsUsed := ReadSymbol(table, br.PrefetchBits())
+	if bitsUsed < 0 {
+		return 0, false
+	}
 	br.SetBitPos(br.BitPos() + bitsUsed)
-	return int(val)
+	return int(val), true
 }
 
 // readPackedSymbols attempts to decode an entire ARGB pixel from the
@@ -531,6 +534,9 @@ func (dec *Decoder) decodeImageData(data []uint32, width, height, lastRow int) e
 			// FillBitWindow already called above — no redundant fill needed.
 			prefetch := br.PrefetchBits()
 			val, bits := ReadSymbol(htreeGroup.HTrees[int(HuffGreen)], prefetch)
+			if bits < 0 {
+				return ErrBitstream
+			}
 			br.SetBitPos(br.BitPos() + bits)
 			code = int(val)
 		}
@@ -549,6 +555,9 @@ func (dec *Decoder) decodeImageData(data []uint32, width, height, lastRow int) e
 				// After green (≤15 bits), ≥17 bits remain — no fill needed.
 				prefetch := br.PrefetchBits()
 				redVal, redBits := ReadSymbol(htreeGroup.HTrees[int(HuffRed)], prefetch)
+				if redBits < 0 {
+					return ErrBitstream
+				}
 				br.SetBitPos(br.BitPos() + redBits)
 
 				// Fill before blue+alpha (green+red consumed ≤30 bits).
@@ -557,12 +566,18 @@ func (dec *Decoder) decodeImageData(data []uint32, width, height, lastRow int) e
 				// Inline readSymbolFromTree for blue.
 				prefetch = br.PrefetchBits()
 				blueVal, blueBits := ReadSymbol(htreeGroup.HTrees[int(HuffBlue)], prefetch)
+				if blueBits < 0 {
+					return ErrBitstream
+				}
 				br.SetBitPos(br.BitPos() + blueBits)
 
 				// Inline readSymbolFromTree for alpha.
 				// After blue (≤15 bits), ≥17 bits remain — no fill needed.
 				prefetch = br.PrefetchBits()
 				alphaVal, alphaBits := ReadSymbol(htreeGroup.HTrees[int(HuffAlpha)], prefetch)
+				if alphaBits < 0 {
+					return ErrBitstream
+				}
 				br.SetBitPos(br.BitPos() + alphaBits)
 
 				// 8.7: Second EOS check after all symbols (C line 1269).
@@ -604,6 +619,9 @@ func (dec *Decoder) decodeImageData(data []uint32, width, height, lastRow int) e
 			br.FillBitWindow()
 			prefetch := br.PrefetchBits()
 			distVal, distBits := ReadSymbol(htreeGroup.HTrees[int(HuffDist)], prefetch)
+			if distBits < 0 {
+				return ErrBitstream
+			}
 			br.SetBitPos(br.BitPos() + distBits)
 			distSymbol := int(distVal)
 

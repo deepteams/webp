@@ -82,13 +82,20 @@ type DecodeConfig struct {
 	DecodePixels bool
 }
 
+// maxInputSize is the maximum allowed input size for animation decoding (256 MB).
+const maxInputSize = 256 * 1024 * 1024
+
 // Decode parses a WebP animation from r, extracting container structure and frames.
 // Pixel data is stored as raw bitstream; actual VP8/VP8L decoding is deferred until
 // FrameDecoderFunc is set and DecodeFrames/AnimDecoder is used.
+// Inputs exceeding 256 MB are rejected.
 func Decode(r io.Reader) (*Animation, error) {
-	data, err := io.ReadAll(r)
+	data, err := io.ReadAll(io.LimitReader(r, maxInputSize+1))
 	if err != nil {
 		return nil, err
+	}
+	if len(data) > maxInputSize {
+		return nil, fmt.Errorf("animation: input too large (exceeds %d bytes)", maxInputSize)
 	}
 	return DecodeBytes(data)
 }
@@ -281,9 +288,20 @@ type AnimDecoder struct {
 	prevBounds           image.Rectangle
 }
 
+// maxCanvasArea is the maximum allowed canvas pixel area for animation decoding.
+const maxCanvasArea = uint64(1) << 30 // ~1 billion pixels, ~4GB NRGBA max
+
 // NewAnimDecoder creates an AnimDecoder from an Animation.
 // The canvas is initialized to transparent (0,0,0,0), matching the C reference.
-func NewAnimDecoder(anim *Animation) *AnimDecoder {
+// Returns an error if canvas dimensions are invalid or exceed safety limits.
+func NewAnimDecoder(anim *Animation) (*AnimDecoder, error) {
+	if anim.CanvasWidth <= 0 || anim.CanvasHeight <= 0 {
+		return nil, fmt.Errorf("animation: invalid canvas %dx%d", anim.CanvasWidth, anim.CanvasHeight)
+	}
+	area := uint64(anim.CanvasWidth) * uint64(anim.CanvasHeight)
+	if area > maxCanvasArea {
+		return nil, fmt.Errorf("animation: canvas too large (%dx%d = %d pixels, max %d)", anim.CanvasWidth, anim.CanvasHeight, area, maxCanvasArea)
+	}
 	bounds := image.Rect(0, 0, anim.CanvasWidth, anim.CanvasHeight)
 	d := &AnimDecoder{
 		anim:              anim,
@@ -291,7 +309,7 @@ func NewAnimDecoder(anim *Animation) *AnimDecoder {
 		prevFrameDisposed: image.NewNRGBA(bounds),
 	}
 	// Both buffers start as zero-filled (transparent), matching C calloc behavior.
-	return d
+	return d, nil
 }
 
 // HasNext reports whether more frames are available.

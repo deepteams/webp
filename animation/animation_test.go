@@ -113,7 +113,10 @@ func TestAnimDecoderSingleFrame(t *testing.T) {
 		}},
 	}
 
-	dec := NewAnimDecoder(anim)
+	dec, err := NewAnimDecoder(anim)
+	if err != nil {
+		t.Fatalf("NewAnimDecoder: %v", err)
+	}
 	snap, dur, err := dec.NextFrame()
 	if err != nil {
 		t.Fatalf("NextFrame: %v", err)
@@ -140,7 +143,10 @@ func TestAnimDecoderBlendAlpha(t *testing.T) {
 		},
 	}
 
-	dec := NewAnimDecoder(anim)
+	dec, err := NewAnimDecoder(anim)
+	if err != nil {
+		t.Fatalf("NewAnimDecoder: %v", err)
+	}
 	dec.NextFrame() // frame 0
 	snap, _, err := dec.NextFrame()
 	if err != nil {
@@ -171,7 +177,10 @@ func TestAnimDecoderBlendNone(t *testing.T) {
 		},
 	}
 
-	dec := NewAnimDecoder(anim)
+	dec, err := NewAnimDecoder(anim)
+	if err != nil {
+		t.Fatalf("NewAnimDecoder: %v", err)
+	}
 	dec.NextFrame()
 	snap, _, err := dec.NextFrame()
 	if err != nil {
@@ -197,7 +206,10 @@ func TestAnimDecoderDisposeBackground(t *testing.T) {
 		},
 	}
 
-	dec := NewAnimDecoder(anim)
+	dec, err := NewAnimDecoder(anim)
+	if err != nil {
+		t.Fatalf("NewAnimDecoder: %v", err)
+	}
 	dec.NextFrame() // frame 0: red, then dispose to transparent
 	snap, _, err := dec.NextFrame()
 	if err != nil {
@@ -231,7 +243,10 @@ func TestAnimDecoderPartialFrame(t *testing.T) {
 		},
 	}
 
-	dec := NewAnimDecoder(anim)
+	dec, err := NewAnimDecoder(anim)
+	if err != nil {
+		t.Fatalf("NewAnimDecoder: %v", err)
+	}
 	dec.NextFrame()
 	snap, _, err := dec.NextFrame()
 	if err != nil {
@@ -250,8 +265,11 @@ func TestAnimDecoderPartialFrame(t *testing.T) {
 
 func TestAnimDecoderNoFrames(t *testing.T) {
 	anim := &Animation{CanvasWidth: 10, CanvasHeight: 10}
-	dec := NewAnimDecoder(anim)
-	_, _, err := dec.NextFrame()
+	dec, err := NewAnimDecoder(anim)
+	if err != nil {
+		t.Fatalf("NewAnimDecoder: %v", err)
+	}
+	_, _, err = dec.NextFrame()
 	if err != ErrNoFrames {
 		t.Errorf("expected ErrNoFrames, got %v", err)
 	}
@@ -263,8 +281,11 @@ func TestAnimDecoderNilImage(t *testing.T) {
 		CanvasHeight: 10,
 		Frames:       []Frame{{Duration: 100 * time.Millisecond}},
 	}
-	dec := NewAnimDecoder(anim)
-	_, _, err := dec.NextFrame()
+	dec, err := NewAnimDecoder(anim)
+	if err != nil {
+		t.Fatalf("NewAnimDecoder: %v", err)
+	}
+	_, _, err = dec.NextFrame()
 	if err != ErrNilImage {
 		t.Errorf("expected ErrNilImage, got %v", err)
 	}
@@ -281,7 +302,10 @@ func TestAnimDecoderHasNext(t *testing.T) {
 		},
 	}
 
-	dec := NewAnimDecoder(anim)
+	dec, err := NewAnimDecoder(anim)
+	if err != nil {
+		t.Fatalf("NewAnimDecoder: %v", err)
+	}
 	if !dec.HasNext() {
 		t.Error("HasNext should be true initially")
 	}
@@ -302,7 +326,10 @@ func TestAnimDecoderReset(t *testing.T) {
 		},
 	}
 
-	dec := NewAnimDecoder(anim)
+	dec, err := NewAnimDecoder(anim)
+	if err != nil {
+		t.Fatalf("NewAnimDecoder: %v", err)
+	}
 	dec.NextFrame()
 	if dec.HasNext() {
 		t.Fatal("should be exhausted")
@@ -773,7 +800,10 @@ func TestCanvasInitTransparent(t *testing.T) {
 		},
 	}
 
-	dec := NewAnimDecoder(anim)
+	dec, err := NewAnimDecoder(anim)
+	if err != nil {
+		t.Fatalf("NewAnimDecoder: %v", err)
+	}
 	snap, _, err := dec.NextFrame()
 	if err != nil {
 		t.Fatalf("NextFrame: %v", err)
@@ -803,7 +833,10 @@ func TestKeyframeDetection_FirstFrame(t *testing.T) {
 			{Image: solidNRGBA(4, 4, red), Duration: 50 * time.Millisecond, Blend: BlendAlpha},
 		},
 	}
-	dec := NewAnimDecoder(anim)
+	dec, err := NewAnimDecoder(anim)
+	if err != nil {
+		t.Fatalf("NewAnimDecoder: %v", err)
+	}
 	// Frame 0 is always a keyframe.
 	if !dec.isKeyFrame(0) {
 		t.Error("frame 0 should always be a keyframe")
@@ -823,7 +856,10 @@ func TestKeyframeDetection_FullCanvasNoBlend(t *testing.T) {
 			{Image: solidNRGBA(4, 4, blue), Duration: 50 * time.Millisecond, Blend: BlendNone},
 		},
 	}
-	dec := NewAnimDecoder(anim)
+	dec, err := NewAnimDecoder(anim)
+	if err != nil {
+		t.Fatalf("NewAnimDecoder: %v", err)
+	}
 	// Advance past frame 0 to set prevDispose state.
 	dec.NextFrame()
 
@@ -845,7 +881,10 @@ func TestKeyframeDetection_PartialFrameNotKeyframe(t *testing.T) {
 			{Image: solidNRGBA(4, 4, blue), OffsetX: 0, OffsetY: 0, Duration: 50 * time.Millisecond, Blend: BlendAlpha},
 		},
 	}
-	dec := NewAnimDecoder(anim)
+	dec, err := NewAnimDecoder(anim)
+	if err != nil {
+		t.Fatalf("NewAnimDecoder: %v", err)
+	}
 	dec.NextFrame()
 
 	if dec.isKeyFrame(1) {
@@ -867,7 +906,10 @@ func TestKeyframeDetection_PrevDisposeBackgroundFullCanvas(t *testing.T) {
 			{Image: solidNRGBA(2, 2, halfBlue), Duration: 50 * time.Millisecond, Blend: BlendAlpha, HasAlpha: true},
 		},
 	}
-	dec := NewAnimDecoder(anim)
+	dec, err := NewAnimDecoder(anim)
+	if err != nil {
+		t.Fatalf("NewAnimDecoder: %v", err)
+	}
 	dec.NextFrame()
 
 	if !dec.isKeyFrame(1) {
@@ -894,7 +936,10 @@ func TestKeyframeDetection_BitstreamFlagNoAlpha(t *testing.T) {
 			{Image: solidNRGBA(4, 4, blue), Duration: 50 * time.Millisecond, Blend: BlendAlpha, HasAlpha: false},
 		},
 	}
-	dec := NewAnimDecoder(anim)
+	dec, err := NewAnimDecoder(anim)
+	if err != nil {
+		t.Fatalf("NewAnimDecoder: %v", err)
+	}
 	dec.NextFrame()
 
 	if !dec.isKeyFrame(1) {
@@ -918,7 +963,10 @@ func TestKeyframeDetection_BitstreamFlagWithAlpha(t *testing.T) {
 			{Image: solidNRGBA(4, 4, halfGreen), Duration: 50 * time.Millisecond, Blend: BlendAlpha, HasAlpha: true},
 		},
 	}
-	dec := NewAnimDecoder(anim)
+	dec, err := NewAnimDecoder(anim)
+	if err != nil {
+		t.Fatalf("NewAnimDecoder: %v", err)
+	}
 	dec.NextFrame()
 
 	if dec.isKeyFrame(1) {
@@ -941,7 +989,10 @@ func TestKeyframeDetection_BitstreamFlagAlphaWithBlendNone(t *testing.T) {
 			{Image: solidNRGBA(4, 4, halfGreen), Duration: 50 * time.Millisecond, Blend: BlendNone, HasAlpha: true},
 		},
 	}
-	dec := NewAnimDecoder(anim)
+	dec, err := NewAnimDecoder(anim)
+	if err != nil {
+		t.Fatalf("NewAnimDecoder: %v", err)
+	}
 	dec.NextFrame()
 
 	if !dec.isKeyFrame(1) {
@@ -969,7 +1020,10 @@ func TestDualBufferDisposeNone(t *testing.T) {
 		},
 	}
 
-	dec := NewAnimDecoder(anim)
+	dec, err := NewAnimDecoder(anim)
+	if err != nil {
+		t.Fatalf("NewAnimDecoder: %v", err)
+	}
 	dec.NextFrame()
 	snap, _, err := dec.NextFrame()
 	if err != nil {

@@ -626,9 +626,15 @@ func TestMuxEmptyFrame(t *testing.T) {
 
 func TestMuxAddChunk(t *testing.T) {
 	m := NewMuxer()
-	m.AddChunk(FourCCICCP, []byte("icc"))
-	m.AddChunk(FourCCEXIF, []byte("exif"))
-	m.AddChunk(FourCCXMP, []byte("xmp"))
+	if err := m.AddChunk(FourCCICCP, []byte("icc")); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.AddChunk(FourCCEXIF, []byte("exif")); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.AddChunk(FourCCXMP, []byte("xmp")); err != nil {
+		t.Fatal(err)
+	}
 
 	if !bytes.Equal(m.iccData, []byte("icc")) {
 		t.Error("AddChunk(ICCP) did not set iccData")

@@ -96,7 +96,14 @@ func (m *Muxer) SetLoopCount(count int) {
 // This matches the C libwebp behavior where the VP8X canvas size is
 // authoritative. Values are stored as-is; the VP8X chunk will encode them
 // as (width-1, height-1) in 24-bit LE.
+// Dimensions are clamped to [0, MaxCanvasSize] (24-bit max).
 func (m *Muxer) SetCanvasSize(width, height int) {
+	if width > container.MaxCanvasSize {
+		width = container.MaxCanvasSize
+	}
+	if height > container.MaxCanvasSize {
+		height = container.MaxCanvasSize
+	}
 	m.canvasWidth = width
 	m.canvasHeight = height
 }
@@ -117,6 +124,9 @@ func clampDuration(d int) int {
 func (m *Muxer) AddFrame(data []byte, opts *FrameOptions) error {
 	if len(data) == 0 {
 		return ErrFrameEmpty
+	}
+	if len(m.frames) >= container.MaxFrames {
+		return fmt.Errorf("mux: too many frames (max %d)", container.MaxFrames)
 	}
 	fo := FrameOptions{}
 	if opts != nil {
@@ -171,7 +181,11 @@ func (m *Muxer) NumFrames() int {
 }
 
 // AddChunk adds an arbitrary metadata chunk (e.g. ICCP, EXIF, XMP).
-func (m *Muxer) AddChunk(id ChunkID, data []byte) {
+// Returns an error if the data exceeds the metadata size limit.
+func (m *Muxer) AddChunk(id ChunkID, data []byte) error {
+	if len(data) > maxMetadataSize {
+		return fmt.Errorf("mux: chunk data too large (%d bytes, max %d)", len(data), maxMetadataSize)
+	}
 	switch id {
 	case FourCCICCP:
 		m.iccData = data
@@ -180,6 +194,7 @@ func (m *Muxer) AddChunk(id ChunkID, data []byte) {
 	case FourCCXMP:
 		m.xmpData = data
 	}
+	return nil
 }
 
 // isAnimated returns true if the muxer has multiple frames or any frame has a non-zero duration.
@@ -337,20 +352,20 @@ func (m *Muxer) assembleExtended(w io.Writer) error {
 	// Determine canvas size. For simple cases, use first frame dimensions.
 	canvasW, canvasH := m.canvasSize()
 
-	// Calculate total RIFF payload size.
-	riffPayload := uint32(4) // "WEBP"
+	// Calculate total RIFF payload size using uint64 to detect overflow.
+	riffPayload64 := uint64(4) // "WEBP"
 
 	// VP8X chunk: header + 10 bytes.
-	riffPayload += container.ChunkHeaderSize + container.VP8XChunkSize
+	riffPayload64 += uint64(container.ChunkHeaderSize) + uint64(container.VP8XChunkSize)
 
 	// ICC chunk.
 	if m.iccData != nil {
-		riffPayload += chunkTotalSize(uint32(len(m.iccData)))
+		riffPayload64 += uint64(chunkTotalSize(uint32(len(m.iccData))))
 	}
 
 	// ANIM chunk.
 	if animated {
-		riffPayload += container.ChunkHeaderSize + container.ANIMChunkSize
+		riffPayload64 += uint64(container.ChunkHeaderSize) + uint64(container.ANIMChunkSize)
 	}
 
 	// Frames.
@@ -361,24 +376,29 @@ func (m *Muxer) assembleExtended(w io.Writer) error {
 			alphaData, bitstream := splitAlphaAndBitstream(f.data)
 			subSize := frameSubChunksSize(alphaData, bitstream)
 			anmfPayload := uint32(container.ANMFChunkSize) + subSize
-			riffPayload += container.ChunkHeaderSize + anmfPayload
+			riffPayload64 += uint64(container.ChunkHeaderSize) + uint64(anmfPayload)
 			if anmfPayload%2 != 0 {
-				riffPayload++
+				riffPayload64++
 			}
 		} else {
-			riffPayload += chunkTotalSize(uint32(len(f.data)))
+			riffPayload64 += uint64(chunkTotalSize(uint32(len(f.data))))
 		}
 	}
 
 	// EXIF chunk.
 	if m.exifData != nil {
-		riffPayload += chunkTotalSize(uint32(len(m.exifData)))
+		riffPayload64 += uint64(chunkTotalSize(uint32(len(m.exifData))))
 	}
 
 	// XMP chunk.
 	if m.xmpData != nil {
-		riffPayload += chunkTotalSize(uint32(len(m.xmpData)))
+		riffPayload64 += uint64(chunkTotalSize(uint32(len(m.xmpData))))
 	}
+
+	if riffPayload64 > uint64(math.MaxUint32) {
+		return fmt.Errorf("mux: RIFF payload too large (%d bytes, exceeds 4GB limit)", riffPayload64)
+	}
+	riffPayload := uint32(riffPayload64)
 
 	// Write RIFF header.
 	header := make([]byte, container.RIFFHeaderSize)
