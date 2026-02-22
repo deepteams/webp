@@ -318,6 +318,18 @@ func validateConfig(opts *EncoderOptions) error {
 	if opts.AlphaQuality > 100 {
 		return fmt.Errorf("webp: invalid AlphaQuality %d (must be 0-100)", opts.AlphaQuality)
 	}
+
+	// Validate metadata sizes (defense-in-depth, matches demuxer limit).
+	const maxEncoderMetadataSize = 100 * 1024 * 1024 // 100 MB
+	if len(opts.ICC) > maxEncoderMetadataSize {
+		return fmt.Errorf("webp: ICC profile too large (%d bytes, max %d)", len(opts.ICC), maxEncoderMetadataSize)
+	}
+	if len(opts.EXIF) > maxEncoderMetadataSize {
+		return fmt.Errorf("webp: EXIF data too large (%d bytes, max %d)", len(opts.EXIF), maxEncoderMetadataSize)
+	}
+	if len(opts.XMP) > maxEncoderMetadataSize {
+		return fmt.Errorf("webp: XMP data too large (%d bytes, max %d)", len(opts.XMP), maxEncoderMetadataSize)
+	}
 	return nil
 }
 

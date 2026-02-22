@@ -358,7 +358,11 @@ func ReadSymbol(table []HuffmanCode, prefetchBits uint32) (value uint16, bitsUse
 		// Second level lookup.
 		bitsUsed = HuffmanTableBits
 		prefetchBits >>= HuffmanTableBits
-		entry = table[int(entry.Value)+int(prefetchBits&((1<<nbits)-1))]
+		idx := int(entry.Value) + int(prefetchBits&((1<<nbits)-1))
+		if idx >= len(table) {
+			return 0, HuffmanTableBits
+		}
+		entry = table[idx]
 		bitsUsed += int(entry.Bits)
 		return entry.Value, bitsUsed
 	}

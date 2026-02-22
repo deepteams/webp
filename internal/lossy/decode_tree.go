@@ -1,5 +1,7 @@
 package lossy
 
+import "fmt"
+
 // parseProba reads coefficient probabilities and skip probability
 // from partition 0 (Paragraph 13, 9.9).
 func parseProba(br BoolSource, dec *Decoder) {
@@ -94,11 +96,19 @@ func (dec *Decoder) parseIntraModeRow() error {
 			var ymode uint8
 			if brB < 0 {
 				brV, brB = brLoad(br, brV, brB)
+				if br.EOF() {
+					brSync(br, brV, brR, brB)
+					return errPrematureEOF
+				}
 			}
 			bit, brV, brR, brB = fastBit(156, brV, brR, brB)
 			if bit != 0 {
 				if brB < 0 {
 					brV, brB = brLoad(br, brV, brB)
+					if br.EOF() {
+						brSync(br, brV, brR, brB)
+						return errPrematureEOF
+					}
 				}
 				bit, brV, brR, brB = fastBit(128, brV, brR, brB)
 				if bit != 0 {
@@ -109,6 +119,10 @@ func (dec *Decoder) parseIntraModeRow() error {
 			} else {
 				if brB < 0 {
 					brV, brB = brLoad(br, brV, brB)
+					if br.EOF() {
+						brSync(br, brV, brR, brB)
+						return errPrematureEOF
+					}
 				}
 				bit, brV, brR, brB = fastBit(163, brV, brR, brB)
 				if bit != 0 {
@@ -142,13 +156,18 @@ func (dec *Decoder) parseIntraModeRow() error {
 					for i > 0 {
 						if brB < 0 {
 							brV, brB = brLoad(br, brV, brB)
+							if br.EOF() {
+								brSync(br, brV, brR, brB)
+								return errPrematureEOF
+							}
 						}
 						bit, brV, brR, brB = fastBit(prob[i], brV, brR, brB)
 						i = int(KYModesIntra4[2*i+bit])
 					}
 					ymode = uint8(-i)
 					if ymode >= 10 { // NumBModes
-						ymode = 0
+						brSync(br, brV, brR, brB)
+						return fmt.Errorf("vp8: invalid 4x4 intra mode %d", ymode)
 					}
 					top[x] = ymode
 					modes[y*4+x] = ymode

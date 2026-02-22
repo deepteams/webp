@@ -486,7 +486,11 @@ func (dec *Decoder) initFrame() error {
 		return fmt.Errorf("vp8: frame too large")
 	}
 
-	slabSize := intraTSize + yuvBSize + cacheYSize + cacheUSize + cacheVSize
+	slabSize64 := uint64(intraTSize) + uint64(yuvBSize) + uint64(cacheYSize) + uint64(cacheUSize) + uint64(cacheVSize)
+	if slabSize64 > 1<<30 {
+		return fmt.Errorf("vp8: frame buffers too large (%d bytes)", slabSize64)
+	}
+	slabSize := int(slabSize64)
 
 	// Reuse-or-grow the byte slab.
 	if cap(dec.slab) >= slabSize {
