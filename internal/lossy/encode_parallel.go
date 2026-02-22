@@ -33,6 +33,7 @@ func getParallelState(numWorkers, mbW, mbH int, useDerr bool) *parallelState {
 			for i := 0; i < mbH; i++ {
 				ps.rs.rows[i].done.Store(0)
 			}
+			ps.nextRow.Store(0)
 			return ps
 		}
 		// Too small, discard and allocate fresh.

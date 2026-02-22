@@ -2,6 +2,7 @@ package lossless
 
 import (
 	"errors"
+	"io"
 	"sort"
 	"sync"
 
@@ -129,6 +130,9 @@ type Encoder struct {
 	// Reusable residuals buffer for ResidualImage.
 	residualsBuf []uint32
 
+	// Reusable color cache for storeImageData.
+	storeCC *ColorCache
+
 	// Reusable output buffer for LosslessWriter.
 	writerBuf []byte
 }
@@ -191,6 +195,60 @@ func Encode(argb []uint32, width, height int, config *EncoderConfig) ([]byte, er
 	out := make([]byte, len(bs))
 	copy(out, bs)
 	return out, nil
+}
+
+// EncodeToWriter encodes ARGB pixel data as a VP8L bitstream and writes it
+// directly to w, avoiding intermediate copies. The writeHeader callback is
+// invoked with the bitstream size before the bitstream is written, allowing
+// the caller to write container framing first.
+func EncodeToWriter(argb []uint32, width, height int, config *EncoderConfig,
+	w io.Writer, writeHeader func(bitstreamSize int) error) error {
+	if width <= 0 || height <= 0 || width > 16383 || height > 16383 {
+		return ErrImageTooLarge
+	}
+	if config == nil {
+		config = DefaultEncoderConfig()
+	}
+
+	enc := acquireEncoder(width, height, config)
+	defer releaseEncoder(enc)
+
+	pixelCount := len(argb)
+	if cap(enc.argb) >= pixelCount {
+		enc.argb = enc.argb[:pixelCount]
+	} else {
+		enc.argb = make([]uint32, pixelCount)
+	}
+	copy(enc.argb, argb)
+
+	enc.analyze()
+	if config.NearLosslessQuality < 100 {
+		ApplyNearLossless(enc.argb, width, height, enc.predictorBits, config.NearLosslessQuality)
+	}
+	enc.applyTransforms()
+
+	bs, err := enc.encodeStream()
+	if err != nil {
+		return err
+	}
+
+	// Write the header (RIFF framing) before the bitstream.
+	if writeHeader != nil {
+		if err := writeHeader(len(bs)); err != nil {
+			return err
+		}
+	}
+
+	// Write the bitstream directly from the pooled buffer.
+	if _, err = w.Write(bs); err != nil {
+		return err
+	}
+
+	// RIFF requires even-aligned chunks; add padding byte if needed.
+	if len(bs)&1 != 0 {
+		_, err = w.Write([]byte{0})
+	}
+	return err
 }
 
 // analyze determines which transforms to use and sets encoding parameters.
@@ -506,10 +564,6 @@ func (enc *Encoder) encodeStream() ([]byte, error) {
 	enc.brScratch.DistArray = enc.traceDistArray
 	cacheBits := GetBackwardReferencesWithScratch(currentWidth, height, enc.argb,
 		quality, lz77Types, enc.cacheBits, hc, refs, &enc.brScratch)
-
-	// Release large hash chain buffers; sub-images will allocate right-sized.
-	enc.hashChain = nil
-	enc.brScratch.BoxHC = nil
 
 	// Build histograms and get symbols.
 	symbols, histoSet := GetHistoImageSymbols(
@@ -885,7 +939,8 @@ func (enc *Encoder) storeImageData(
 ) {
 	var cc *ColorCache
 	if cacheBits > 0 {
-		cc = NewColorCache(cacheBits)
+		cc = ReuseColorCache(enc.storeCC, cacheBits)
+		enc.storeCC = cc
 	}
 
 	x := 0

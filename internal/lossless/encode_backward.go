@@ -68,13 +68,18 @@ func (br *BackwardRefs) Refs() []PixOrCopy {
 // Distances stored here are raw pixel offsets. They are converted to VP8L
 // plane codes by a separate BackwardReferences2DLocality post-processing
 // pass, matching the C reference implementation.
-func BackwardReferencesLz77(xsize, ysize int, argb []uint32, cacheBits int, hc *HashChain, refs *BackwardRefs) {
+func BackwardReferencesLz77(xsize, ysize int, argb []uint32, cacheBits int, hc *HashChain, refs *BackwardRefs, scratch *BackwardRefsScratch) {
 	size := xsize * ysize
 	refs.Reset()
 
 	var cc *ColorCache
 	if cacheBits > 0 {
-		cc = NewColorCache(cacheBits)
+		if scratch != nil {
+			cc = ReuseColorCache(scratch.CC, cacheBits)
+			scratch.CC = cc
+		} else {
+			cc = NewColorCache(cacheBits)
+		}
 	}
 
 	for i := 0; i < size; {
@@ -114,13 +119,18 @@ func BackwardReferencesLz77(xsize, ysize int, argb []uint32, cacheBits int, hc *
 // BackwardReferencesRle generates backward references using run-length
 // encoding only. Consecutive identical pixels are encoded as CopyPixel tokens
 // with distance 1. Non-repeating pixels become LiteralPixel tokens.
-func BackwardReferencesRle(xsize, ysize int, argb []uint32, cacheBits int, refs *BackwardRefs) {
+func BackwardReferencesRle(xsize, ysize int, argb []uint32, cacheBits int, refs *BackwardRefs, scratch *BackwardRefsScratch) {
 	size := xsize * ysize
 	refs.Reset()
 
 	var cc *ColorCache
 	if cacheBits > 0 {
-		cc = NewColorCache(cacheBits)
+		if scratch != nil {
+			cc = ReuseColorCache(scratch.CC, cacheBits)
+			scratch.CC = cc
+		} else {
+			cc = NewColorCache(cacheBits)
+		}
 	}
 
 	for i := 0; i < size; {
@@ -359,7 +369,7 @@ func BackwardReferencesLz77Box(xsize, ysize int, argb []uint32, cacheBits int,
 		}
 	}
 
-	BackwardReferencesLz77(xsize, ysize, argb, cacheBits, boxHC, refs)
+	BackwardReferencesLz77(xsize, ysize, argb, cacheBits, boxHC, refs, scratch)
 }
 
 // ---------------------------------------------------------------------------
@@ -594,11 +604,17 @@ func histogramEstimateBitsUint64(h *Histogram) uint64 {
 // the cache is updated for the copied pixels.
 //
 // This matches BackwardRefsWithLocalCache in the C reference.
-func BackwardRefsWithLocalCache(argb []uint32, cacheBits int, refs *BackwardRefs) {
+func BackwardRefsWithLocalCache(argb []uint32, cacheBits int, refs *BackwardRefs, scratch *BackwardRefsScratch) {
 	if cacheBits <= 0 {
 		return
 	}
-	cc := NewColorCache(cacheBits)
+	var cc *ColorCache
+	if scratch != nil {
+		cc = ReuseColorCache(scratch.CC, cacheBits)
+		scratch.CC = cc
+	} else {
+		cc = NewColorCache(cacheBits)
+	}
 	pixelIndex := 0
 
 	for ri := range refs.refs {
@@ -649,6 +665,7 @@ type BackwardRefsScratch struct {
 	CountsIni []uint16      // reusable for Lz77Box
 	BoxHC     *HashChain    // reusable hash chain for Lz77Box
 	CostsBuf  []float32     // reusable costs buffer for costManager
+	CC        *ColorCache   // reusable color cache
 
 	// Reusable slabs for CalculateBestCacheSize.
 	CacheSizeHistoSlab []Histogram
@@ -704,7 +721,7 @@ func GetBackwardReferencesWithScratch(
 	// The C reference runs all strategies without cache first, then applies
 	// the cache in a separate pass.
 	if lz77Types&kLZ77Standard != 0 {
-		BackwardReferencesLz77(width, height, argb, 0, hc, candidate)
+		BackwardReferencesLz77(width, height, argb, 0, hc, candidate, scratch)
 		cost := histogramEstimateBitsFromRefsScratch(candidate, 0, histoScratch)
 		if cost < bestCost {
 			bestCost = cost
@@ -714,7 +731,7 @@ func GetBackwardReferencesWithScratch(
 	}
 
 	if lz77Types&kLZ77RLE != 0 {
-		BackwardReferencesRle(width, height, argb, 0, candidate)
+		BackwardReferencesRle(width, height, argb, 0, candidate, scratch)
 		cost := histogramEstimateBitsFromRefsScratch(candidate, 0, histoScratch)
 		if cost < bestCost {
 			bestCost = cost
@@ -747,7 +764,7 @@ func GetBackwardReferencesWithScratch(
 
 	// Phase 3: If a color cache is beneficial, apply it to the refs.
 	if bestCacheBits > 0 {
-		BackwardRefsWithLocalCache(argb, bestCacheBits, best)
+		BackwardRefsWithLocalCache(argb, bestCacheBits, best, scratch)
 	}
 
 	// Recompute cost with the chosen cache bits.
@@ -1342,7 +1359,12 @@ func backwardReferencesHashChainDistanceOnly(
 
 	var cc *ColorCache
 	if useColorCache {
-		cc = NewColorCache(cacheBits)
+		if scratch != nil {
+			cc = ReuseColorCache(scratch.CC, cacheBits)
+			scratch.CC = cc
+		} else {
+			cc = NewColorCache(cacheBits)
+		}
 	}
 
 	// First pixel.
@@ -1438,11 +1460,17 @@ func backwardReferencesHashChainFollowChosenPath(
 	argb []uint32, cacheBits int,
 	chosenPath []uint16, chosenPathSize int,
 	hc *HashChain, refs *BackwardRefs,
+	scratch *BackwardRefsScratch,
 ) bool {
 	useColorCache := cacheBits > 0
 	var cc *ColorCache
 	if useColorCache {
-		cc = NewColorCache(cacheBits)
+		if scratch != nil {
+			cc = ReuseColorCache(scratch.CC, cacheBits)
+			scratch.CC = cc
+		} else {
+			cc = NewColorCache(cacheBits)
+		}
 	}
 
 	refs.Reset()
@@ -1505,7 +1533,7 @@ func backwardReferencesTraceBackwardsWithDist(
 	chosenPath, chosenPathSize := traceBackwards(distArray, distArraySize)
 
 	if !backwardReferencesHashChainFollowChosenPath(
-		argb, cacheBits, chosenPath, chosenPathSize, hc, refsDst) {
+		argb, cacheBits, chosenPath, chosenPathSize, hc, refsDst, scratch) {
 		return false
 	}
 

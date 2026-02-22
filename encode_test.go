@@ -1974,3 +1974,58 @@ func TestEncodeLossy_Preprocessing1_SmoothSegmentMap(t *testing.T) {
 		t.Fatalf("decoded size = %dx%d, want 64x64", decoded.Bounds().Dx(), decoded.Bounds().Dy())
 	}
 }
+
+// --- Preset override tests ---
+
+func TestOptionsForPreset_Override(t *testing.T) {
+	// Get preset options for PresetPhoto at quality 90.
+	opts := OptionsForPreset(PresetPhoto, 90)
+
+	// Verify preset defaults are applied.
+	if opts.Quality != 90 {
+		t.Errorf("Quality = %v, want 90", opts.Quality)
+	}
+	if opts.SNSStrength != 80 {
+		t.Errorf("SNSStrength = %d, want 80 (PresetPhoto default)", opts.SNSStrength)
+	}
+	if opts.FilterSharpness != 3 {
+		t.Errorf("FilterSharpness = %d, want 3 (PresetPhoto default)", opts.FilterSharpness)
+	}
+	if opts.FilterStrength != 30 {
+		t.Errorf("FilterStrength = %d, want 30 (PresetPhoto default)", opts.FilterStrength)
+	}
+
+	// Override specific fields.
+	opts.SNSStrength = 0
+	opts.Quality = 50
+
+	// Verify overrides took effect.
+	if opts.SNSStrength != 0 {
+		t.Errorf("after override: SNSStrength = %d, want 0", opts.SNSStrength)
+	}
+	if opts.Quality != 50 {
+		t.Errorf("after override: Quality = %v, want 50", opts.Quality)
+	}
+
+	// Verify other preset fields are unchanged.
+	if opts.FilterSharpness != 3 {
+		t.Errorf("after override: FilterSharpness = %d, want 3 (should be unchanged)", opts.FilterSharpness)
+	}
+	if opts.FilterStrength != 30 {
+		t.Errorf("after override: FilterStrength = %d, want 30 (should be unchanged)", opts.FilterStrength)
+	}
+
+	// Verify the modified options produce valid output.
+	img := gradientTestImage(32, 32)
+	var buf bytes.Buffer
+	if err := Encode(&buf, img, opts); err != nil {
+		t.Fatalf("Encode with overridden preset: %v", err)
+	}
+	decoded, err := Decode(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if decoded.Bounds().Dx() != 32 || decoded.Bounds().Dy() != 32 {
+		t.Fatalf("decoded size = %dx%d, want 32x32", decoded.Bounds().Dx(), decoded.Bounds().Dy())
+	}
+}

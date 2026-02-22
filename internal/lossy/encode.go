@@ -230,6 +230,12 @@ type VP8Encoder struct {
 	// Pre-allocated analysis buffers (avoid per-analysis allocs).
 	analysisAlphas []int
 	segMapTmp      []uint8
+
+	// Pre-allocated serial UV conversion buffers (dithered/non-NRGBA path).
+	// Reused via the encoder pool when dimensions match.
+	serialRowR, serialRowG, serialRowB, serialRowA [2][]uint8
+	serialPlanarR, serialPlanarG, serialPlanarB, serialPlanarA []uint8
+	serialTmpRGB []uint16
 }
 
 // MBEncInfo stores per-macroblock encoding decisions.
@@ -615,6 +621,27 @@ func (enc *VP8Encoder) allocateBuffers() {
 	enc.topDerr = make([][2][2]int8, mbW)
 	enc.useDerr = enc.config.Method >= 3
 
+	// Serial UV conversion buffers (reused when encoder pool returns matching dims).
+	padW := mbW * 16
+	uvWidth := (padW + 1) >> 1
+	serialSlab := make([]uint8, padW*8+padW*2*4)
+	off := 0
+	for i := 0; i < 2; i++ {
+		enc.serialRowR[i] = serialSlab[off : off+padW]
+		off += padW
+		enc.serialRowG[i] = serialSlab[off : off+padW]
+		off += padW
+		enc.serialRowB[i] = serialSlab[off : off+padW]
+		off += padW
+		enc.serialRowA[i] = serialSlab[off : off+padW]
+		off += padW
+	}
+	planarSlab := serialSlab[off:]
+	enc.serialPlanarR = planarSlab[:padW*2]
+	enc.serialPlanarG = planarSlab[padW*2 : padW*4]
+	enc.serialPlanarB = planarSlab[padW*4 : padW*6]
+	enc.serialPlanarA = planarSlab[padW*6 : padW*8]
+	enc.serialTmpRGB = make([]uint16, uvWidth*4)
 }
 
 // importImage converts the input image to YUV420 and stores it in the
@@ -860,16 +887,16 @@ func (enc *VP8Encoder) importImage(img image.Image) {
 		uvwg.Wait()
 	} else {
 		// Serial path for dithered or non-NRGBA images.
-		// Allocate row buffers only when actually needed (fast NRGBA path above skips this).
-		rowR := [2][]uint8{make([]uint8, padW), make([]uint8, padW)}
-		rowG := [2][]uint8{make([]uint8, padW), make([]uint8, padW)}
-		rowB := [2][]uint8{make([]uint8, padW), make([]uint8, padW)}
-		rowA := [2][]uint8{make([]uint8, padW), make([]uint8, padW)}
-		tmpRGB := make([]uint16, uvWidth*4)
-		planarR := make([]uint8, padW*2)
-		planarG := make([]uint8, padW*2)
-		planarB := make([]uint8, padW*2)
-		planarA := make([]uint8, padW*2)
+		// Reuse pre-allocated buffers from the encoder struct (pooled).
+		rowR := enc.serialRowR
+		rowG := enc.serialRowG
+		rowB := enc.serialRowB
+		rowA := enc.serialRowA
+		tmpRGB := enc.serialTmpRGB
+		planarR := enc.serialPlanarR[:padW*2]
+		planarG := enc.serialPlanarG[:padW*2]
+		planarB := enc.serialPlanarB[:padW*2]
+		planarA := enc.serialPlanarA[:padW*2]
 		if !hasAlpha {
 			for i := range planarA {
 				planarA[i] = 0xff

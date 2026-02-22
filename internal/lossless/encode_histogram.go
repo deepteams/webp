@@ -559,6 +559,17 @@ type HistoScratch struct {
 	Slab    []Histogram
 	LitSlab []uint32
 	Ptrs    []*Histogram
+
+	// Reusable slices for GetHistoImageSymbols.
+	ImageHistoPtrs []*Histogram // imageHisto.histos
+	TileHead       []int        // tileTracker.head
+	TileTail       []int        // tileTracker.tail
+	TileNext       []int        // tileTracker.next
+	Symbols        []uint16     // symbols output
+
+	// Reusable slabs for extractClusterCenters.
+	ClusterSlab    []Histogram
+	ClusterLitSlab []uint32
 }
 
 // allocateHistoSet creates a set pre-populated with initialized histograms.
@@ -1403,8 +1414,14 @@ func GetHistoImageSymbols(width, height int, refs *BackwardRefs, quality int,
 	// slab. This avoids allocating a full copy (~9.5 MB savings). After
 	// clustering modifies the shared data, we extract cluster centers into a
 	// small slab and rebuild origHisto for the remap pass.
+	var ihPtrs []*Histogram
+	if scratch != nil && cap(scratch.ImageHistoPtrs) >= imageHistoRawSize {
+		ihPtrs = scratch.ImageHistoPtrs[:0]
+	} else {
+		ihPtrs = make([]*Histogram, 0, imageHistoRawSize)
+	}
 	imageHisto := &HistoSet{
-		histos:    make([]*Histogram, 0, imageHistoRawSize),
+		histos:    ihPtrs,
 		cacheBits: cacheBits,
 	}
 
@@ -1430,10 +1447,26 @@ func GetHistoImageSymbols(width, height int, refs *BackwardRefs, quality int,
 	// corresponding original tile index as a single-element linked list.
 	if skipRemap {
 		n := len(imageHisto.histos)
+		var ttHead, ttTail, ttNext []int
+		if scratch != nil && cap(scratch.TileHead) >= n {
+			ttHead = scratch.TileHead[:n]
+		} else {
+			ttHead = make([]int, n)
+		}
+		if scratch != nil && cap(scratch.TileTail) >= n {
+			ttTail = scratch.TileTail[:n]
+		} else {
+			ttTail = make([]int, n)
+		}
+		if scratch != nil && cap(scratch.TileNext) >= imageHistoRawSize {
+			ttNext = scratch.TileNext[:imageHistoRawSize]
+		} else {
+			ttNext = make([]int, imageHistoRawSize)
+		}
 		tt := &tileTracker{
-			head: make([]int, n),
-			tail: make([]int, n),
-			next: make([]int, imageHistoRawSize),
+			head: ttHead,
+			tail: ttTail,
+			next: ttNext,
 		}
 		for i := range tt.next {
 			tt.next[i] = -1
@@ -1488,9 +1521,14 @@ func GetHistoImageSymbols(width, height int, refs *BackwardRefs, quality int,
 	// Extract cluster centers into a small separate slab so origHisto's
 	// backing memory can be rebuilt for the remap pass (or decoupled from
 	// origHisto when using tracked assignments).
-	extractClusterCenters(imageHisto, cacheBits)
+	extractClusterCenters(imageHisto, cacheBits, scratch)
 
-	symbols := make([]uint16, imageHistoRawSize)
+	var symbols []uint16
+	if scratch != nil && cap(scratch.Symbols) >= imageHistoRawSize {
+		symbols = scratch.Symbols[:imageHistoRawSize]
+	} else {
+		symbols = make([]uint16, imageHistoRawSize)
+	}
 
 	if skipRemap && imageHisto.tiles != nil {
 		// Fast path: build symbols directly from tracked tile→cluster
@@ -1537,25 +1575,52 @@ func GetHistoImageSymbols(width, height int, refs *BackwardRefs, quality int,
 		h.computeHistogramCost()
 	}
 
+	// Save reusable slices back to scratch for the next encode.
+	if scratch != nil {
+		scratch.ImageHistoPtrs = imageHisto.histos
+		if imageHisto.tiles != nil {
+			scratch.TileHead = imageHisto.tiles.head
+			scratch.TileTail = imageHisto.tiles.tail
+			scratch.TileNext = imageHisto.tiles.next
+		}
+		scratch.Symbols = symbols
+	}
+
 	return symbols, imageHisto
 }
 
 // extractClusterCenters copies the cluster center histograms from the shared
 // origHisto slab into a small dedicated slab. This decouples imageHisto from
 // origHisto so the latter can be rebuilt for the remap pass.
-func extractClusterCenters(imageHisto *HistoSet, cacheBits int) {
+func extractClusterCenters(imageHisto *HistoSet, cacheBits int, scratch *HistoScratch) {
 	n := len(imageHisto.histos)
 	if n == 0 {
 		return
 	}
 	litSize := histogramNumCodes(cacheBits)
-	slab := make([]Histogram, n)
-	litSlab := make([]uint32, n*litSize)
+	totalLit := n * litSize
+
+	var slab []Histogram
+	var litSlab []uint32
+	if scratch != nil && cap(scratch.ClusterSlab) >= n {
+		slab = scratch.ClusterSlab[:n]
+	} else {
+		slab = make([]Histogram, n)
+	}
+	if scratch != nil && cap(scratch.ClusterLitSlab) >= totalLit {
+		litSlab = scratch.ClusterLitSlab[:totalLit]
+	} else {
+		litSlab = make([]uint32, totalLit)
+	}
 	for i := 0; i < n; i++ {
 		dst := &slab[i]
 		dst.Literal = litSlab[i*litSize : (i+1)*litSize : (i+1)*litSize]
 		dst.copyFrom(imageHisto.histos[i])
 		imageHisto.histos[i] = dst
+	}
+	if scratch != nil {
+		scratch.ClusterSlab = slab
+		scratch.ClusterLitSlab = litSlab
 	}
 }
 

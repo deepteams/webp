@@ -1113,3 +1113,158 @@ func floatName(f float32) string {
 func dimName(w, h int) string {
 	return fmt.Sprintf("%dx%d", w, h)
 }
+
+// --- S10: Additional Max Dimension Tests ---
+
+func TestEdge_MaxDimension_Height_Rejected(t *testing.T) {
+	img := makeNRGBA(1, 16384, color.NRGBA{R: 255, A: 255})
+	var buf bytes.Buffer
+	err := Encode(&buf, img, nil)
+	if err == nil {
+		t.Fatal("expected error for 1x16384, got nil")
+	}
+}
+
+func TestEdge_MaxDimension_Both_Rejected(t *testing.T) {
+	img := makeNRGBA(16384, 16384, color.NRGBA{R: 255, A: 255})
+	var buf bytes.Buffer
+	err := Encode(&buf, img, nil)
+	if err == nil {
+		t.Fatal("expected error for 16384x16384, got nil")
+	}
+}
+
+func TestEdge_MaxDimension_Lossless_Rejected(t *testing.T) {
+	img := makeNRGBA(16384, 1, color.NRGBA{R: 128, G: 64, B: 32, A: 255})
+	var buf bytes.Buffer
+	err := Encode(&buf, img, &EncoderOptions{Lossless: true, Quality: 75})
+	if err == nil {
+		t.Fatal("expected error for 16384x1 lossless, got nil")
+	}
+}
+
+func TestEdge_MaxDimension_Boundary_Lossy(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping large dimension test in -short mode")
+	}
+	img := makeNRGBA(16383, 1, color.NRGBA{R: 128, G: 64, B: 32, A: 255})
+	decoded := encodeAndDecode(t, img, &EncoderOptions{Quality: 75})
+	if b := decoded.Bounds(); b.Dx() != 16383 || b.Dy() != 1 {
+		t.Errorf("decoded size = %dx%d, want 16383x1", b.Dx(), b.Dy())
+	}
+}
+
+// --- S11: Lossless Exact + Transparent RGB ---
+
+func TestEdge_Lossless_ExactPreservesTransparentRGBGradient(t *testing.T) {
+	const W, H = 16, 16
+	img := image.NewNRGBA(image.Rect(0, 0, W, H))
+	for y := 0; y < H; y++ {
+		for x := 0; x < W; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{
+				R: uint8(x * 16),
+				G: uint8(y * 16),
+				B: uint8((x + y) * 8),
+				A: 0,
+			})
+		}
+	}
+	decoded := encodeAndDecode(t, img, &EncoderOptions{Lossless: true, Quality: 75, Exact: true})
+	nrgba, ok := decoded.(*image.NRGBA)
+	if !ok {
+		t.Fatalf("decoded type %T, want *image.NRGBA", decoded)
+	}
+	for y := 0; y < H; y++ {
+		for x := 0; x < W; x++ {
+			orig := img.NRGBAAt(x, y)
+			dec := nrgba.NRGBAAt(x, y)
+			if orig != dec {
+				t.Fatalf("pixel(%d,%d) orig=%v dec=%v", x, y, orig, dec)
+			}
+		}
+	}
+}
+
+// --- S12: Non-NRGBA Image Type Lossless Roundtrips ---
+
+func TestEdge_ImageGray_Lossless_Roundtrip(t *testing.T) {
+	const W, H = 16, 16
+	src := image.NewGray(image.Rect(0, 0, W, H))
+	for y := 0; y < H; y++ {
+		for x := 0; x < W; x++ {
+			src.SetGray(x, y, color.Gray{Y: uint8(x*16 + y)})
+		}
+	}
+	decoded := encodeAndDecode(t, src, &EncoderOptions{Lossless: true, Quality: 75})
+	nrgba, ok := decoded.(*image.NRGBA)
+	if !ok {
+		t.Fatalf("decoded type %T, want *image.NRGBA", decoded)
+	}
+	for y := 0; y < H; y++ {
+		for x := 0; x < W; x++ {
+			grayVal := src.GrayAt(x, y)
+			expected := color.NRGBAModel.Convert(grayVal).(color.NRGBA)
+			dec := nrgba.NRGBAAt(x, y)
+			if dec.R != expected.R || dec.G != expected.G || dec.B != expected.B || dec.A != expected.A {
+				t.Fatalf("pixel(%d,%d) dec=%v, want %v (gray=%d)", x, y, dec, expected, grayVal.Y)
+			}
+		}
+	}
+}
+
+func TestEdge_ImageGray16_Lossless_Roundtrip(t *testing.T) {
+	const W, H = 16, 16
+	src := image.NewGray16(image.Rect(0, 0, W, H))
+	for y := 0; y < H; y++ {
+		for x := 0; x < W; x++ {
+			v := uint16((x*16 + y) * 256)
+			src.SetGray16(x, y, color.Gray16{Y: v})
+		}
+	}
+	decoded := encodeAndDecode(t, src, &EncoderOptions{Lossless: true, Quality: 75})
+	nrgba, ok := decoded.(*image.NRGBA)
+	if !ok {
+		t.Fatalf("decoded type %T, want *image.NRGBA", decoded)
+	}
+	for y := 0; y < H; y++ {
+		for x := 0; x < W; x++ {
+			gray16Val := src.Gray16At(x, y)
+			expected := color.NRGBAModel.Convert(gray16Val).(color.NRGBA)
+			dec := nrgba.NRGBAAt(x, y)
+			if dec.R != expected.R || dec.G != expected.G || dec.B != expected.B || dec.A != expected.A {
+				t.Fatalf("pixel(%d,%d) dec=%v, want %v (gray16=%d)", x, y, dec, expected, gray16Val.Y)
+			}
+		}
+	}
+}
+
+func TestEdge_ImagePaletted_Lossless_Roundtrip(t *testing.T) {
+	const W, H = 16, 16
+	pal := color.Palette{
+		color.NRGBA{R: 255, G: 0, B: 0, A: 255},
+		color.NRGBA{R: 0, G: 255, B: 0, A: 255},
+		color.NRGBA{R: 0, G: 0, B: 255, A: 255},
+		color.NRGBA{R: 255, G: 255, B: 0, A: 255},
+	}
+	src := image.NewPaletted(image.Rect(0, 0, W, H), pal)
+	for y := 0; y < H; y++ {
+		for x := 0; x < W; x++ {
+			src.SetColorIndex(x, y, uint8((x+y)%4))
+		}
+	}
+	decoded := encodeAndDecode(t, src, &EncoderOptions{Lossless: true, Quality: 75})
+	nrgba, ok := decoded.(*image.NRGBA)
+	if !ok {
+		t.Fatalf("decoded type %T, want *image.NRGBA", decoded)
+	}
+	for y := 0; y < H; y++ {
+		for x := 0; x < W; x++ {
+			srcColor := src.At(x, y)
+			expected := color.NRGBAModel.Convert(srcColor).(color.NRGBA)
+			dec := nrgba.NRGBAAt(x, y)
+			if dec != expected {
+				t.Fatalf("pixel(%d,%d) dec=%v, want %v", x, y, dec, expected)
+			}
+		}
+	}
+}

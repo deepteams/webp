@@ -8,6 +8,8 @@ import (
 	"image/color"
 	"io"
 	"math"
+	"runtime"
+	"sync"
 	"time"
 
 	"github.com/deepteams/webp/mux"
@@ -171,6 +173,79 @@ func (a *Animation) DecodeFrames() error {
 		f.Image = img
 	}
 	return nil
+}
+
+// DecodeFramesParallel decodes all frames using FrameDecoderFunc in parallel.
+// Each frame's VP8/VP8L bitstream is decoded independently on a separate
+// goroutine. The number of concurrent decoders is limited to GOMAXPROCS.
+// Frames that already have a non-nil Image are skipped.
+// For small frame counts (<= 2), falls back to sequential DecodeFrames.
+func (a *Animation) DecodeFramesParallel() error {
+	if FrameDecoderFunc == nil {
+		return ErrNoDecoder
+	}
+
+	// Collect indices of frames that need decoding.
+	var toDecodeIdx []int
+	for i := range a.Frames {
+		if a.Frames[i].Image == nil && a.Frames[i].BitstreamData != nil {
+			toDecodeIdx = append(toDecodeIdx, i)
+		}
+	}
+	if len(toDecodeIdx) == 0 {
+		return nil
+	}
+	if len(toDecodeIdx) <= 2 {
+		return a.DecodeFrames()
+	}
+
+	numWorkers := runtime.GOMAXPROCS(0)
+	if numWorkers > len(toDecodeIdx) {
+		numWorkers = len(toDecodeIdx)
+	}
+
+	type decodeResult struct {
+		idx int
+		img image.Image
+		err error
+	}
+
+	work := make(chan int, len(toDecodeIdx))
+	for _, idx := range toDecodeIdx {
+		work <- idx
+	}
+	close(work)
+
+	results := make(chan decodeResult, len(toDecodeIdx))
+	var wg sync.WaitGroup
+	for w := 0; w < numWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range work {
+				f := &a.Frames[idx]
+				img, err := FrameDecoderFunc(f.BitstreamData, f.AlphaData)
+				results <- decodeResult{idx: idx, img: img, err: err}
+			}
+		}()
+	}
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	var firstErr error
+	for r := range results {
+		if r.err != nil && firstErr == nil {
+			firstErr = r.err
+			continue
+		}
+		if r.err == nil {
+			a.Frames[r.idx].Image = r.img
+		}
+	}
+	return firstErr
 }
 
 // argbToNRGBA converts an ARGB uint32 to color.NRGBA.
@@ -852,15 +927,7 @@ func isCanvasIdentical(a, b *image.NRGBA) bool {
 	if a == nil || b == nil {
 		return false
 	}
-	if len(a.Pix) != len(b.Pix) {
-		return false
-	}
-	for i := range a.Pix {
-		if a.Pix[i] != b.Pix[i] {
-			return false
-		}
-	}
-	return true
+	return bytes.Equal(a.Pix, b.Pix)
 }
 
 // increasePreviousDuration extends the previous frame's duration by durMS
@@ -913,41 +980,75 @@ func (e *AnimEncoder) increasePreviousDuration(durMS int) error {
 // findChangedRect computes the bounding rectangle of pixels that differ
 // between prev and curr. Both images must have the same dimensions.
 // Returns an empty rectangle if all pixels are identical.
+//
+// Uses bytes.Equal per row for SIMD-accelerated skip of identical rows,
+// then narrows X boundaries progressively within changed rows.
 func findChangedRect(prev, curr *image.NRGBA) image.Rectangle {
 	w := prev.Bounds().Dx()
 	h := prev.Bounds().Dy()
 	if w == 0 || h == 0 {
 		return image.Rectangle{}
 	}
+	stride := prev.Stride
+	rowLen := w * 4
 
-	minX, minY := w, h
-	maxX, maxY := 0, 0
-
+	// Find top boundary: first changed row.
+	minY := h
 	for y := 0; y < h; y++ {
-		rowOff := y * prev.Stride
-		for x := 0; x < w; x++ {
+		off := y * stride
+		if !bytes.Equal(prev.Pix[off:off+rowLen], curr.Pix[off:off+rowLen]) {
+			minY = y
+			break
+		}
+	}
+	if minY == h {
+		return image.Rectangle{} // identical
+	}
+
+	// Find bottom boundary: last changed row.
+	maxY := minY + 1
+	for y := h - 1; y > minY; y-- {
+		off := y * stride
+		if !bytes.Equal(prev.Pix[off:off+rowLen], curr.Pix[off:off+rowLen]) {
+			maxY = y + 1
+			break
+		}
+	}
+
+	// Find X boundaries within changed rows (progressive narrowing).
+	minX := w
+	maxX := 0
+	for y := minY; y < maxY; y++ {
+		rowOff := y * stride
+		// Scan left, only up to current minX.
+		for x := 0; x < minX; x++ {
 			off := rowOff + x*4
 			if prev.Pix[off] != curr.Pix[off] ||
 				prev.Pix[off+1] != curr.Pix[off+1] ||
 				prev.Pix[off+2] != curr.Pix[off+2] ||
 				prev.Pix[off+3] != curr.Pix[off+3] {
-				if x < minX {
-					minX = x
-				}
-				if x >= maxX {
-					maxX = x + 1
-				}
-				if y < minY {
-					minY = y
-				}
-				if y >= maxY {
-					maxY = y + 1
-				}
+				minX = x
+				break
 			}
+		}
+		// Scan right, only beyond current maxX.
+		for x := w - 1; x >= maxX; x-- {
+			off := rowOff + x*4
+			if prev.Pix[off] != curr.Pix[off] ||
+				prev.Pix[off+1] != curr.Pix[off+1] ||
+				prev.Pix[off+2] != curr.Pix[off+2] ||
+				prev.Pix[off+3] != curr.Pix[off+3] {
+				maxX = x + 1
+				break
+			}
+		}
+		// Early exit: we've found the widest possible range.
+		if minX == 0 && maxX == w {
+			break
 		}
 	}
 
-	if maxX <= minX || maxY <= minY {
+	if maxX <= minX {
 		return image.Rectangle{}
 	}
 	return image.Rect(minX, minY, maxX, maxY)

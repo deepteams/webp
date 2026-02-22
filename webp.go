@@ -90,8 +90,17 @@ func DecodeConfig(r io.Reader) (image.Config, error) {
 	}
 
 	feat := p.Features()
+
+	// Determine color model to match what Decode() actually returns:
+	//   - VP8L (lossless) always decodes to *image.NRGBA
+	//   - VP8 (lossy) without alpha decodes to *image.YCbCr
+	//   - VP8 (lossy) with alpha decodes to *image.NRGBA
 	cm := color.NRGBAModel
-	if !feat.HasAlpha {
+	if frames := p.Frames(); len(frames) > 0 {
+		if !frames[0].IsLossless && frames[0].AlphaData == nil {
+			cm = color.YCbCrModel
+		}
+	} else if !feat.HasAlpha {
 		cm = color.YCbCrModel
 	}
 

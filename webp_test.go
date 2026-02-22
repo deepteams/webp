@@ -744,3 +744,240 @@ func TestEncodeWithMetadata_NoMetadata(t *testing.T) {
 		t.Error("simple encode without metadata should not produce VP8X container")
 	}
 }
+
+// --- DecodeConfig color model for all format variants ---
+
+func TestDecodeConfig_ColorModel_AllFormats(t *testing.T) {
+	// Helper to create a 16x16 opaque test image.
+	opaqueImg := image.NewNRGBA(image.Rect(0, 0, 16, 16))
+	for y := 0; y < 16; y++ {
+		for x := 0; x < 16; x++ {
+			opaqueImg.SetNRGBA(x, y, color.NRGBA{R: 200, G: 100, B: 50, A: 255})
+		}
+	}
+
+	// Helper to create a 16x16 semi-transparent test image.
+	alphaImg := image.NewNRGBA(image.Rect(0, 0, 16, 16))
+	for y := 0; y < 16; y++ {
+		for x := 0; x < 16; x++ {
+			alphaImg.SetNRGBA(x, y, color.NRGBA{R: 200, G: 100, B: 50, A: 128})
+		}
+	}
+
+	tests := []struct {
+		name      string
+		img       image.Image
+		opts      *EncoderOptions
+		wantModel color.Model
+	}{
+		{
+			name:      "lossy_opaque",
+			img:       opaqueImg,
+			opts:      &EncoderOptions{Quality: 75},
+			wantModel: color.YCbCrModel,
+		},
+		{
+			name:      "lossless",
+			img:       opaqueImg,
+			opts:      &EncoderOptions{Lossless: true, Quality: 75},
+			wantModel: color.NRGBAModel,
+		},
+		{
+			name:      "lossy_with_alpha",
+			img:       alphaImg,
+			opts:      &EncoderOptions{Quality: 75},
+			wantModel: color.NRGBAModel,
+		},
+		{
+			name: "lossy_with_icc",
+			img:  opaqueImg,
+			opts: func() *EncoderOptions {
+				o := DefaultOptions()
+				o.Quality = 75
+				o.ICC = make([]byte, 100)
+				for i := range o.ICC {
+					o.ICC[i] = byte(i)
+				}
+				return o
+			}(),
+			wantModel: color.YCbCrModel,
+		},
+		{
+			name: "lossless_with_exif",
+			img:  opaqueImg,
+			opts: func() *EncoderOptions {
+				o := DefaultOptions()
+				o.Lossless = true
+				o.Quality = 75
+				o.EXIF = make([]byte, 100)
+				for i := range o.EXIF {
+					o.EXIF[i] = byte(i)
+				}
+				return o
+			}(),
+			wantModel: color.NRGBAModel,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := Encode(&buf, tt.img, tt.opts); err != nil {
+				t.Fatalf("Encode: %v", err)
+			}
+
+			cfg, err := DecodeConfig(bytes.NewReader(buf.Bytes()))
+			if err != nil {
+				t.Fatalf("DecodeConfig: %v", err)
+			}
+			if cfg.ColorModel != tt.wantModel {
+				t.Errorf("ColorModel = %v, want %v", cfg.ColorModel, tt.wantModel)
+			}
+		})
+	}
+}
+
+// --- Large metadata round-trip tests ---
+
+func TestEncodeWithMetadata_LargeICC(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping large metadata test in -short mode")
+	}
+
+	// 1MB ICC blob.
+	iccData := make([]byte, 1<<20)
+	for i := range iccData {
+		iccData[i] = byte(i % 256)
+	}
+
+	img := image.NewNRGBA(image.Rect(0, 0, 16, 16))
+	for y := 0; y < 16; y++ {
+		for x := 0; x < 16; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{R: 128, G: 128, B: 128, A: 255})
+		}
+	}
+
+	opts := DefaultOptions()
+	opts.Quality = 75
+	opts.ICC = iccData
+
+	var buf bytes.Buffer
+	if err := Encode(&buf, img, opts); err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+
+	// Verify ICC is preserved via mux.NewDemuxer.
+	dm, err := mux.NewDemuxer(buf.Bytes())
+	if err != nil {
+		t.Fatalf("NewDemuxer: %v", err)
+	}
+
+	icc, err := dm.GetChunk(mux.FourCCICCP)
+	if err != nil {
+		t.Fatalf("GetChunk(ICCP): %v", err)
+	}
+	if !bytes.Equal(icc, iccData) {
+		t.Errorf("ICC data mismatch: got %d bytes, want %d bytes", len(icc), len(iccData))
+	}
+}
+
+func TestEncodeWithMetadata_AllLargeBlobs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping large metadata test in -short mode")
+	}
+
+	const blobSize = 100 * 1024 // 100KB each
+	iccData := make([]byte, blobSize)
+	exifData := make([]byte, blobSize)
+	xmpData := make([]byte, blobSize)
+	for i := 0; i < blobSize; i++ {
+		iccData[i] = byte(i % 251)
+		exifData[i] = byte(i % 241)
+		xmpData[i] = byte(i % 239)
+	}
+
+	img := image.NewNRGBA(image.Rect(0, 0, 16, 16))
+	for y := 0; y < 16; y++ {
+		for x := 0; x < 16; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{R: 200, G: 100, B: 50, A: 255})
+		}
+	}
+
+	subtests := []struct {
+		name string
+		opts *EncoderOptions
+	}{
+		{
+			name: "lossy",
+			opts: func() *EncoderOptions {
+				o := DefaultOptions()
+				o.Quality = 75
+				o.ICC = iccData
+				o.EXIF = exifData
+				o.XMP = xmpData
+				return o
+			}(),
+		},
+		{
+			name: "lossless",
+			opts: func() *EncoderOptions {
+				o := DefaultOptions()
+				o.Lossless = true
+				o.Quality = 75
+				o.ICC = iccData
+				o.EXIF = exifData
+				o.XMP = xmpData
+				return o
+			}(),
+		},
+	}
+
+	for _, tt := range subtests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := Encode(&buf, img, tt.opts); err != nil {
+				t.Fatalf("Encode: %v", err)
+			}
+
+			dm, err := mux.NewDemuxer(buf.Bytes())
+			if err != nil {
+				t.Fatalf("NewDemuxer: %v", err)
+			}
+
+			feat := dm.GetFeatures()
+			if !feat.HasICC {
+				t.Error("HasICC should be true")
+			}
+			if !feat.HasEXIF {
+				t.Error("HasEXIF should be true")
+			}
+			if !feat.HasXMP {
+				t.Error("HasXMP should be true")
+			}
+
+			icc, err := dm.GetChunk(mux.FourCCICCP)
+			if err != nil {
+				t.Fatalf("GetChunk(ICCP): %v", err)
+			}
+			if !bytes.Equal(icc, iccData) {
+				t.Errorf("ICC mismatch: got %d bytes, want %d", len(icc), len(iccData))
+			}
+
+			exif, err := dm.GetChunk(mux.FourCCEXIF)
+			if err != nil {
+				t.Fatalf("GetChunk(EXIF): %v", err)
+			}
+			if !bytes.Equal(exif, exifData) {
+				t.Errorf("EXIF mismatch: got %d bytes, want %d", len(exif), len(exifData))
+			}
+
+			xmp, err := dm.GetChunk(mux.FourCCXMP)
+			if err != nil {
+				t.Fatalf("GetChunk(XMP): %v", err)
+			}
+			if !bytes.Equal(xmp, xmpData) {
+				t.Errorf("XMP mismatch: got %d bytes, want %d", len(xmp), len(xmpData))
+			}
+		})
+	}
+}

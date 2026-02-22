@@ -6,12 +6,18 @@ import (
 	"image"
 	"image/color"
 	"io"
+	"sync"
 
 	"github.com/deepteams/webp/internal/container"
 	"github.com/deepteams/webp/internal/lossless"
 	"github.com/deepteams/webp/internal/lossy"
 	"github.com/deepteams/webp/sharpyuv"
 )
+
+// argbBuf is a reusable ARGB pixel buffer for lossless encoding.
+type argbBuf struct{ data []uint32 }
+
+var argbPool = sync.Pool{New: func() any { return &argbBuf{} }}
 
 // MaxDimension is the maximum allowed width or height for a WebP image, in
 // pixels. This matches libwebp's WEBP_MAX_DIMENSION constant. Images larger
@@ -409,22 +415,26 @@ func Encode(w io.Writer, img image.Image, opts *EncoderOptions) error {
 		return fmt.Errorf("webp: image dimension %dx%d exceeds maximum %d", imgW, imgH, MaxDimension)
 	}
 
-	var bitstream []byte
-	var fourcc uint32
-	var alphaData []byte
-	var err error
-
 	if opts.Lossless {
-		// VP8L handles alpha natively in the ARGB pixel data.
-		bitstream, fourcc, err = encodeLossless(img, opts)
-	} else {
-		bitstream, alphaData, fourcc, err = encodeLossyWithAlpha(img, opts)
+		hasMetadata := len(opts.ICC) > 0 || len(opts.EXIF) > 0 || len(opts.XMP) > 0
+		if !hasMetadata {
+			// Fast streaming path: write RIFF header + bitstream directly to w,
+			// avoiding intermediate buffer copies.
+			return encodeLosslessToWriter(w, img, opts)
+		}
+		// Metadata path: must buffer bitstream to compute RIFF sizes.
+		bitstream, fourcc, err := encodeLossless(img, opts)
+		if err != nil {
+			return err
+		}
+		return writeRIFF(w, fourcc, bitstream, nil, imgW, imgH, opts)
 	}
+
+	bitstream, alphaData, fourcc, err := encodeLossyWithAlpha(img, opts)
 	if err != nil {
 		return err
 	}
-
-	return writeRIFF(w, fourcc, bitstream, alphaData, img.Bounds().Dx(), img.Bounds().Dy(), opts)
+	return writeRIFF(w, fourcc, bitstream, alphaData, imgW, imgH, opts)
 }
 
 // encodeLossyWithAlpha encodes the image as a VP8 lossy bitstream and,
@@ -575,7 +585,14 @@ func encodeLossless(img image.Image, opts *EncoderOptions) ([]byte, uint32, erro
 	// Using RGBA() directly would give premultiplied values, which causes
 	// double-premultiplication when the decoder's argbToNRGBA treats them
 	// as non-premultiplied on output.
-	argb := make([]uint32, width*height)
+	pixelCount := width * height
+	ab := argbPool.Get().(*argbBuf)
+	if cap(ab.data) >= pixelCount {
+		ab.data = ab.data[:pixelCount]
+	} else {
+		ab.data = make([]uint32, pixelCount)
+	}
+	argb := ab.data
 	if nrgba, ok := img.(*image.NRGBA); ok {
 		for y := 0; y < height; y++ {
 			rowOff := (y+bounds.Min.Y-nrgba.Rect.Min.Y)*nrgba.Stride + (bounds.Min.X-nrgba.Rect.Min.X)*4
@@ -620,10 +637,93 @@ func encodeLossless(img image.Image, opts *EncoderOptions) ([]byte, uint32, erro
 		NearLosslessQuality: 100,
 	}
 	bs, err := lossless.Encode(argb, width, height, lcfg)
+	argbPool.Put(ab)
 	if err != nil {
 		return nil, 0, fmt.Errorf("webp: lossless encode: %w", err)
 	}
 	return bs, container.FourCCVP8L, nil
+}
+
+// encodeLosslessToWriter encodes the image and writes the RIFF/WEBP container
+// directly to w, avoiding intermediate bitstream and RIFF buffer copies.
+// Only used for the simple (no-metadata) lossless path.
+func encodeLosslessToWriter(w io.Writer, img image.Image, opts *EncoderOptions) error {
+	bounds := img.Bounds()
+	width := bounds.Dx()
+	height := bounds.Dy()
+
+	pixelCount := width * height
+	ab := argbPool.Get().(*argbBuf)
+	if cap(ab.data) >= pixelCount {
+		ab.data = ab.data[:pixelCount]
+	} else {
+		ab.data = make([]uint32, pixelCount)
+	}
+	argb := ab.data
+	if nrgba, ok := img.(*image.NRGBA); ok {
+		for y := 0; y < height; y++ {
+			rowOff := (y+bounds.Min.Y-nrgba.Rect.Min.Y)*nrgba.Stride + (bounds.Min.X-nrgba.Rect.Min.X)*4
+			for x := 0; x < width; x++ {
+				off := rowOff + x*4
+				argb[y*width+x] = uint32(nrgba.Pix[off+3])<<24 | uint32(nrgba.Pix[off])<<16 | uint32(nrgba.Pix[off+1])<<8 | uint32(nrgba.Pix[off+2])
+			}
+		}
+	} else if rgba, ok := img.(*image.RGBA); ok {
+		for y := 0; y < height; y++ {
+			rowOff := (y+bounds.Min.Y-rgba.Rect.Min.Y)*rgba.Stride + (bounds.Min.X-rgba.Rect.Min.X)*4
+			for x := 0; x < width; x++ {
+				off := rowOff + x*4
+				a := rgba.Pix[off+3]
+				r, g, b := rgba.Pix[off], rgba.Pix[off+1], rgba.Pix[off+2]
+				if a > 0 && a < 255 {
+					a16 := uint16(a)
+					r = uint8(uint16(r) * 255 / a16)
+					g = uint8(uint16(g) * 255 / a16)
+					b = uint8(uint16(b) * 255 / a16)
+				}
+				argb[y*width+x] = uint32(a)<<24 | uint32(r)<<16 | uint32(g)<<8 | uint32(b)
+			}
+		}
+	} else {
+		for y := 0; y < height; y++ {
+			for x := 0; x < width; x++ {
+				c := color.NRGBAModel.Convert(img.At(bounds.Min.X+x, bounds.Min.Y+y)).(color.NRGBA)
+				argb[y*width+x] = uint32(c.A)<<24 | uint32(c.R)<<16 | uint32(c.G)<<8 | uint32(c.B)
+			}
+		}
+	}
+
+	if !opts.Exact {
+		cleanupTransparentAreaLossless(argb)
+	}
+
+	lcfg := &lossless.EncoderConfig{
+		Quality:             int(opts.Quality),
+		Method:              opts.Method,
+		NearLosslessQuality: 100,
+	}
+
+	fourcc := container.FourCCVP8L
+	err := lossless.EncodeToWriter(argb, width, height, lcfg, w,
+		func(bitstreamSize int) error {
+			argbPool.Put(ab)
+			// Write simple RIFF/WEBP header directly to w.
+			payloadSize := uint32(bitstreamSize)
+			paddedPayload := payloadSize + (payloadSize & 1)
+			riffSize := 4 + container.ChunkHeaderSize + paddedPayload
+			var hdr [20]byte
+			binary.LittleEndian.PutUint32(hdr[0:4], container.FourCCRIFF)
+			binary.LittleEndian.PutUint32(hdr[4:8], riffSize)
+			binary.LittleEndian.PutUint32(hdr[8:12], container.FourCCWEBP)
+			binary.LittleEndian.PutUint32(hdr[12:16], fourcc)
+			binary.LittleEndian.PutUint32(hdr[16:20], payloadSize)
+			_, err := w.Write(hdr[:])
+			return err
+		})
+	if err != nil {
+		return fmt.Errorf("webp: lossless encode: %w", err)
+	}
+	return nil
 }
 
 // cleanupTransparentAreaLossy smooths out fully-transparent regions of the

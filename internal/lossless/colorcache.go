@@ -68,3 +68,20 @@ func (c *ColorCache) Reset() {
 func (c *ColorCache) Copy(src *ColorCache) {
 	copy(c.Colors, src.Colors)
 }
+
+// ReuseColorCache returns a reset ColorCache with the given hashBits.
+// If existing is non-nil and already has the right capacity, it is reused.
+// Otherwise a new ColorCache is allocated.
+func ReuseColorCache(existing *ColorCache, hashBits int) *ColorCache {
+	size := 1 << hashBits
+	if existing != nil && cap(existing.Colors) >= size {
+		existing.Colors = existing.Colors[:size]
+		existing.HashShift = 32 - hashBits
+		existing.HashBits = hashBits
+		for i := range existing.Colors {
+			existing.Colors[i] = 0
+		}
+		return existing
+	}
+	return NewColorCache(hashBits)
+}
