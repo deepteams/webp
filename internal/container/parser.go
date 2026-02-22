@@ -373,6 +373,11 @@ func parseANMF(payload []byte) (FrameInfo, error) {
 		Duration: readLE24(payload[12:15]),
 	}
 
+	// Validate offsets are non-negative.
+	if frame.XOffset < 0 || frame.YOffset < 0 {
+		return FrameInfo{}, fmt.Errorf("%w: negative frame offset", ErrInvalidChunk)
+	}
+
 	bits := payload[15]
 	if bits&1 != 0 {
 		frame.DisposeMethod = DisposeBackground

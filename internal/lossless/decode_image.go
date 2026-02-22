@@ -216,6 +216,9 @@ func (dec *Decoder) readHuffmanCodes(xsize, ysize, colorCacheBits int, allowRecu
 			numHTreeGroups = 0
 			for i := 0; i < huffmanPixs; i++ {
 				g := int(subImage[i])
+				if g < 0 || g >= len(mapping) {
+					return ErrBitstream
+				}
 				if mapping[g] == -1 {
 					mapping[g] = numHTreeGroups
 					numHTreeGroups++
@@ -374,7 +377,11 @@ func (dec *Decoder) getMetaIndex(x, y int) int {
 }
 
 // getHTreeGroup returns the HTreeGroup for pixel position (x, y).
+// Returns nil if htreeGroups is empty (malformed bitstream).
 func (dec *Decoder) getHTreeGroup(x, y int) *HTreeGroup {
+	if len(dec.hdr.htreeGroups) == 0 {
+		return nil
+	}
 	idx := dec.getMetaIndex(x, y)
 	if idx < 0 || idx >= len(dec.hdr.htreeGroups) {
 		return &dec.hdr.htreeGroups[0]
@@ -457,11 +464,17 @@ func (dec *Decoder) decodeImageData(data []uint32, width, height, lastRow int) e
 	var htreeGroup *HTreeGroup
 	if pos < srcLast {
 		htreeGroup = dec.getHTreeGroup(col, row)
+		if htreeGroup == nil {
+			return ErrBitstream
+		}
 	}
 
 	for pos < srcLast {
 		if (col & mask) == 0 {
 			htreeGroup = dec.getHTreeGroup(col, row)
+			if htreeGroup == nil {
+				return ErrBitstream
+			}
 		}
 
 		// 8.5: Fast path: trivial code (single literal for all channels).
@@ -625,6 +638,9 @@ func (dec *Decoder) decodeImageData(data []uint32, width, height, lastRow int) e
 			}
 			if col&mask != 0 {
 				htreeGroup = dec.getHTreeGroup(col, row)
+				if htreeGroup == nil {
+					return ErrBitstream
+				}
 			}
 			// 8.3: Cache ALL pixels from lastCached to pos, including
 			// any literals that preceded this backward reference.

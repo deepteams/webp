@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 
 	"github.com/deepteams/webp/internal/container"
 )
@@ -239,6 +240,10 @@ func (m *Muxer) validate() error {
 		}
 		endX := f.opts.OffsetX + fw
 		endY := f.opts.OffsetY + fh
+		// Check for integer overflow.
+		if fw > 0 && endX <= f.opts.OffsetX || fh > 0 && endY <= f.opts.OffsetY {
+			return fmt.Errorf("%w: frame %d offset+dimension overflow", ErrMuxValidation, i)
+		}
 		if endX > canvasW || endY > canvasH {
 			return fmt.Errorf("%w: frame %d (%dx%d at %d,%d) exceeds canvas (%dx%d)",
 				ErrMuxValidation, i, fw, fh, f.opts.OffsetX, f.opts.OffsetY, canvasW, canvasH)
@@ -552,6 +557,13 @@ func (m *Muxer) canvasSize() (int, int) {
 		fw, fh := frameDimensions(f.data)
 		endX := f.opts.OffsetX + fw
 		endY := f.opts.OffsetY + fh
+		// Guard against integer overflow.
+		if fw > 0 && endX < f.opts.OffsetX {
+			endX = math.MaxInt
+		}
+		if fh > 0 && endY < f.opts.OffsetY {
+			endY = math.MaxInt
+		}
 		if endX > maxW {
 			maxW = endX
 		}

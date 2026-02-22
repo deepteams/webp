@@ -409,6 +409,11 @@ func (d *Demuxer) parseANMF(data []byte) error {
 	duration := int(data[12]) | int(data[13])<<8 | int(data[14])<<16
 	flagByte := data[15]
 
+	// Validate offsets are non-negative.
+	if offsetX < 0 || offsetY < 0 {
+		return fmt.Errorf("%w: negative frame offset", ErrInvalidANMF)
+	}
+
 	// Validate frame area to prevent excessive memory allocation.
 	if uint64(width)*uint64(height) >= container.MaxImageArea {
 		return fmt.Errorf("%w: frame dimensions %dx%d too large", ErrInvalidANMF, width, height)

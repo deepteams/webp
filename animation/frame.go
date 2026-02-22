@@ -9,6 +9,7 @@ package animation
 import (
 	"image"
 	"image/color"
+	"math"
 	"time"
 )
 
@@ -79,7 +80,16 @@ func (f *Frame) Bounds() image.Rectangle {
 		w = b.Dx()
 		h = b.Dy()
 	}
-	return image.Rect(f.OffsetX, f.OffsetY, f.OffsetX+w, f.OffsetY+h)
+	// Protect against integer overflow.
+	maxX := f.OffsetX + w
+	maxY := f.OffsetY + h
+	if w > 0 && maxX < f.OffsetX {
+		maxX = math.MaxInt
+	}
+	if h > 0 && maxY < f.OffsetY {
+		maxY = math.MaxInt
+	}
+	return image.Rect(f.OffsetX, f.OffsetY, maxX, maxY)
 }
 
 // HasImage reports whether the frame image has been decoded.
