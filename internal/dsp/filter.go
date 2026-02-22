@@ -88,9 +88,9 @@ func doFilter6(p []byte, off, step int) {
 
 // ---------- Simple filter ----------
 
-// SimpleVFilter16 applies the simple loop filter vertically across a 16-wide edge.
+// simpleVFilter16Go applies the simple loop filter vertically across a 16-wide edge.
 // p is the full buffer, base is the offset of the edge row within p.
-func SimpleVFilter16(p []byte, base, stride, thresh int) {
+func simpleVFilter16Go(p []byte, base, stride, thresh int) {
 	thresh2 := 2*thresh + 1
 	for i := 0; i < 16; i++ {
 		off := base + i

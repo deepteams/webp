@@ -1,6 +1,7 @@
 package dsp
 
 import (
+	"math/rand"
 	"testing"
 )
 
@@ -289,4 +290,159 @@ func TestUpsampleLinePairOddWidth(t *testing.T) {
 	// All is well if we don't panic.
 	t.Logf("odd width=%d: last pixel RGB=(%d,%d,%d)", width,
 		topDst[(width-1)*3], topDst[(width-1)*3+1], topDst[(width-1)*3+2])
+}
+
+// ---------- UpsampleLinePairNRGBA SSE2 Conformance ----------
+
+// TestUpsampleLinePairNRGBAConformance verifies the dispatched (SSE2)
+// UpsampleLinePairNRGBA matches the pure Go reference bit-for-bit across
+// random inputs of varying widths.
+func TestUpsampleLinePairNRGBAConformance(t *testing.T) {
+	rng := rand.New(rand.NewSource(99))
+
+	for iter := 0; iter < 500; iter++ {
+		// Vary width: test 1..64 pixels and a few larger widths.
+		width := rng.Intn(64) + 1
+		if iter%50 == 0 {
+			width = rng.Intn(512) + 64
+		}
+
+		chromaW := (width + 1) / 2
+		topY := makeRandBuf(rng, width)
+		botY := makeRandBuf(rng, width)
+		topU := makeRandBuf(rng, chromaW)
+		topV := makeRandBuf(rng, chromaW)
+		botU := makeRandBuf(rng, chromaW)
+		botV := makeRandBuf(rng, chromaW)
+
+		// Test with both alpha and no alpha.
+		var alphaTop, alphaBot []byte
+		if iter%3 != 0 {
+			alphaTop = makeRandBuf(rng, width)
+			alphaBot = makeRandBuf(rng, width)
+		}
+
+		// Go reference output.
+		goTopDst := make([]byte, width*4)
+		goBotDst := make([]byte, width*4)
+		upsampleLinePairNRGBAGo(topY, botY, topU, topV, botU, botV,
+			goTopDst, goBotDst, alphaTop, alphaBot, width)
+
+		// Dispatched (SSE2 on amd64) output.
+		dispTopDst := make([]byte, width*4)
+		dispBotDst := make([]byte, width*4)
+		UpsampleLinePairNRGBA(topY, botY, topU, topV, botU, botV,
+			dispTopDst, dispBotDst, alphaTop, alphaBot, width)
+
+		for x := 0; x < width; x++ {
+			off := x * 4
+			for c := 0; c < 4; c++ {
+				if goTopDst[off+c] != dispTopDst[off+c] {
+					t.Fatalf("iter %d, width %d, top[%d][%d]: Go=%d dispatch=%d",
+						iter, width, x, c, goTopDst[off+c], dispTopDst[off+c])
+				}
+				if goBotDst[off+c] != dispBotDst[off+c] {
+					t.Fatalf("iter %d, width %d, bot[%d][%d]: Go=%d dispatch=%d",
+						iter, width, x, c, goBotDst[off+c], dispBotDst[off+c])
+				}
+			}
+		}
+	}
+}
+
+// TestUpsampleLinePairNRGBAConformanceNilBot tests conformance with botY=nil.
+func TestUpsampleLinePairNRGBAConformanceNilBot(t *testing.T) {
+	rng := rand.New(rand.NewSource(100))
+
+	for iter := 0; iter < 200; iter++ {
+		width := rng.Intn(64) + 1
+		chromaW := (width + 1) / 2
+		topY := makeRandBuf(rng, width)
+		topU := makeRandBuf(rng, chromaW)
+		topV := makeRandBuf(rng, chromaW)
+		botU := makeRandBuf(rng, chromaW)
+		botV := makeRandBuf(rng, chromaW)
+
+		var alphaTop []byte
+		if iter%2 == 0 {
+			alphaTop = makeRandBuf(rng, width)
+		}
+
+		goTopDst := make([]byte, width*4)
+		upsampleLinePairNRGBAGo(topY, nil, topU, topV, botU, botV,
+			goTopDst, nil, alphaTop, nil, width)
+
+		dispTopDst := make([]byte, width*4)
+		UpsampleLinePairNRGBA(topY, nil, topU, topV, botU, botV,
+			dispTopDst, nil, alphaTop, nil, width)
+
+		for x := 0; x < width; x++ {
+			off := x * 4
+			for c := 0; c < 4; c++ {
+				if goTopDst[off+c] != dispTopDst[off+c] {
+					t.Fatalf("iter %d, width %d, top[%d][%d]: Go=%d dispatch=%d",
+						iter, width, x, c, goTopDst[off+c], dispTopDst[off+c])
+				}
+			}
+		}
+	}
+}
+
+// ---------- Benchmarks ----------
+
+func BenchmarkUpsampleLinePairNRGBAGo(b *testing.B) {
+	width := 1920
+	chromaW := (width + 1) / 2
+	topY := make([]byte, width)
+	botY := make([]byte, width)
+	topU := make([]byte, chromaW)
+	topV := make([]byte, chromaW)
+	botU := make([]byte, chromaW)
+	botV := make([]byte, chromaW)
+	topDst := make([]byte, width*4)
+	botDst := make([]byte, width*4)
+	// Fill with representative values.
+	for i := range topY {
+		topY[i] = byte(128 + i%64)
+		botY[i] = byte(128 + i%64)
+	}
+	for i := range topU {
+		topU[i] = byte(100 + i%56)
+		topV[i] = byte(100 + i%56)
+		botU[i] = byte(100 + i%56)
+		botV[i] = byte(100 + i%56)
+	}
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		upsampleLinePairNRGBAGo(topY, botY, topU, topV, botU, botV,
+			topDst, botDst, nil, nil, width)
+	}
+}
+
+func BenchmarkUpsampleLinePairNRGBADispatch(b *testing.B) {
+	width := 1920
+	chromaW := (width + 1) / 2
+	topY := make([]byte, width)
+	botY := make([]byte, width)
+	topU := make([]byte, chromaW)
+	topV := make([]byte, chromaW)
+	botU := make([]byte, chromaW)
+	botV := make([]byte, chromaW)
+	topDst := make([]byte, width*4)
+	botDst := make([]byte, width*4)
+	for i := range topY {
+		topY[i] = byte(128 + i%64)
+		botY[i] = byte(128 + i%64)
+	}
+	for i := range topU {
+		topU[i] = byte(100 + i%56)
+		topV[i] = byte(100 + i%56)
+		botU[i] = byte(100 + i%56)
+		botV[i] = byte(100 + i%56)
+	}
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		UpsampleLinePairNRGBA(topY, botY, topU, topV, botU, botV,
+			topDst, botDst, nil, nil, width)
+	}
 }

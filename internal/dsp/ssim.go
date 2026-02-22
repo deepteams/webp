@@ -310,9 +310,9 @@ func abs(x int) int {
 	return x
 }
 
-// TDisto4x4 computes the perceptual Hadamard-domain distortion for a 4x4 block.
+// tDisto4x4Go computes the perceptual Hadamard-domain distortion for a 4x4 block.
 // Both a and b are BPS-strided buffers.
-func TDisto4x4(a, b []byte) int {
+func tDisto4x4Go(a, b []byte) int {
 	sum1 := tTransform(a, kWeightY[:])
 	sum2 := tTransform(b, kWeightY[:])
 	d := sum2 - sum1
@@ -322,13 +322,13 @@ func TDisto4x4(a, b []byte) int {
 	return d >> 5
 }
 
-// TDisto16x16 computes the perceptual Hadamard-domain distortion for a 16x16 block.
+// tDisto16x16Go computes the perceptual Hadamard-domain distortion for a 16x16 block.
 // Both a and b are BPS-strided buffers.
-func TDisto16x16(a, b []byte) int {
+func tDisto16x16Go(a, b []byte) int {
 	d := 0
 	for y := 0; y < 16*BPS; y += 4 * BPS {
 		for x := 0; x < 16; x += 4 {
-			d += TDisto4x4(a[x+y:], b[x+y:])
+			d += tDisto4x4Go(a[x+y:], b[x+y:])
 		}
 	}
 	return d

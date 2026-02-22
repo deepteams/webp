@@ -1208,12 +1208,9 @@ func encodeI16ResidualsParallel(enc *VP8Encoder, w *RowWorker, mbX, mbY int, inf
 					&seg.Y1, 1, 0, ctx, &enc.proba, seg.TLambdaI16)
 				info.NzY[blockIdx] = uint8(nz)
 			} else {
+				// QuantizeCoeffs returns zigzag nzCount directly.
 				nz = QuantizeCoeffs(info.Coeffs[coeffOff:coeffOff+16], info.Coeffs[coeffOff:coeffOff+16], &seg.Y1, 1)
-				if nz == 0 {
-					info.NzY[blockIdx] = 0
-				} else {
-					info.NzY[blockIdx] = uint8(nzCount(info.Coeffs[coeffOff : coeffOff+16]))
-				}
+				info.NzY[blockIdx] = uint8(nz)
 			}
 			if nz > 0 {
 				nzY |= 1 << uint(blockIdx)
@@ -1230,12 +1227,11 @@ func encodeI16ResidualsParallel(enc *VP8Encoder, w *RowWorker, mbX, mbY int, inf
 	whtOut := &w.tmpCoeffs
 	dsp.FTransformWHT(dcCoeffs[:], whtOut[:])
 
+	// QuantizeCoeffs returns zigzag nzCount directly.
 	nzDC := QuantizeCoeffs(whtOut[:], info.Coeffs[384:400], &seg.Y2, 0)
+	info.NzDC = uint8(nzDC)
 	if nzDC > 0 {
 		nzY |= 1 << 24
-		info.NzDC = uint8(nzCount(info.Coeffs[384:400]))
-	} else {
-		info.NzDC = 0
 	}
 
 	info.NonZeroY = nzY
@@ -1274,12 +1270,9 @@ func encodeI4ResidualsParallel(enc *VP8Encoder, w *RowWorker, mbX, mbY int, info
 
 			dsp.FTransformDirect(srcY[srcOff:], predY[srcOff:], info.Coeffs[coeffOff:])
 
+			// QuantizeCoeffs returns zigzag nzCount directly.
 			nz := QuantizeCoeffs(info.Coeffs[coeffOff:coeffOff+16], info.Coeffs[coeffOff:coeffOff+16], &seg.Y1, 0)
-			if nz == 0 {
-				info.NzY[blockIdx] = 0
-			} else {
-				info.NzY[blockIdx] = uint8(nzCount(info.Coeffs[coeffOff : coeffOff+16]))
-			}
+			info.NzY[blockIdx] = uint8(nz)
 			if nz > 0 {
 				nzY |= 1 << uint(blockIdx)
 				l = 1
@@ -1341,13 +1334,10 @@ func encodeUVResidualsParallel(enc *VP8Encoder, w *RowWorker, mbX, mbY int, info
 				uvBase := 16 + int(ch/2)*4
 				coeffOff := (uvBase + blockIdx) * 16
 
+				// QuantizeCoeffs returns zigzag nzCount directly.
 				nz := QuantizeCoeffs(info.Coeffs[coeffOff:coeffOff+16], info.Coeffs[coeffOff:coeffOff+16], &seg.UV, 0)
 				uvIdx := int(ch/2)*4 + blockIdx
-				if nz == 0 {
-					info.NzUV[uvIdx] = 0
-				} else {
-					info.NzUV[uvIdx] = uint8(nzCount(info.Coeffs[coeffOff : coeffOff+16]))
-				}
+				info.NzUV[uvIdx] = uint8(nz)
 				if nz > 0 {
 					nzUV |= 1 << uint(ch/2*4+uint(blockIdx))
 					l = 1
