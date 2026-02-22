@@ -2,6 +2,7 @@ package lossless
 
 import (
 	"errors"
+	"fmt"
 	"image"
 	"runtime"
 	"sync"
@@ -27,6 +28,7 @@ func acquireDecoder() *Decoder {
 		dec.nextTransform = 0
 		dec.transformsSeen = 0
 		dec.hdr = metadata{}
+		dec.recursionDepth = 0
 		// Keep: pixels, codeLengthsBuf, huffScratch (for reuse)
 		return dec
 	}
@@ -92,6 +94,10 @@ type Decoder struct {
 	// Pooled buffers to reduce allocations across decode calls.
 	colorCacheBuf  []uint32    // reusable color cache backing array
 	htreeGroupsBuf []HTreeGroup // reusable HTreeGroup slice
+
+	// recursionDepth tracks sub-image recursion depth to prevent
+	// stack overflow from malicious bitstreams.
+	recursionDepth int
 }
 
 // metadata holds the Huffman-related state for the current decode level.
@@ -136,6 +142,12 @@ func DecodeVP8L(data []byte) (*image.NRGBA, error) {
 	tw := dec.transformWidth
 	if tw == 0 {
 		tw = dec.Width // fallback if no transform changed the width
+	}
+
+	// Guard against dimension overflow: reject images whose pixel count
+	// would overflow int or cause unreasonable memory allocation.
+	if uint64(dec.Width)*uint64(dec.Height) > 1<<30 {
+		return nil, fmt.Errorf("lossless: image too large (%dx%d)", dec.Width, dec.Height)
 	}
 
 	// Allocate output + cache. The pixel buffer uses the original image
@@ -271,6 +283,12 @@ func (dec *Decoder) decodeImageStream(xsize, ysize int, isLevel0 bool) error {
 // decodeSubImage reads a complete sub-image (transform data, meta Huffman)
 // and returns the decoded ARGB pixels.
 func (dec *Decoder) decodeSubImage(xsize, ysize int) ([]uint32, error) {
+	dec.recursionDepth++
+	if dec.recursionDepth > 3 {
+		return nil, ErrBitstream
+	}
+	defer func() { dec.recursionDepth-- }()
+
 	// Save current metadata.
 	savedHdr := dec.hdr
 	dec.hdr = metadata{}

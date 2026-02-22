@@ -149,6 +149,9 @@ var CodeToPlane = [CodeToPlaneCodesCount]uint8{
 // PlaneCodeToDistance converts a VP8L distance code to an actual pixel
 // distance, given the image width (xsize).
 func PlaneCodeToDistance(xsize int, planeCode int) int {
+	if planeCode <= 0 {
+		return 1
+	}
 	if planeCode > CodeToPlaneCodesCount {
 		return planeCode - CodeToPlaneCodesCount
 	}

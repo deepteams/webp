@@ -63,8 +63,9 @@ func (p *Parser) parse(data []byte) error {
 	}
 
 	// Limit parsing to the declared RIFF size.
-	riffEnd := int(hdr.FileSize) + ChunkHeaderSize
-	if riffEnd > len(data) {
+	riffEnd64 := uint64(hdr.FileSize) + uint64(ChunkHeaderSize)
+	riffEnd := int(riffEnd64)
+	if riffEnd64 > uint64(len(data)) {
 		riffEnd = len(data)
 	}
 	buf := data[consumed:riffEnd]
@@ -223,6 +224,9 @@ func (p *Parser) parseVP8XChunks(buf []byte) error {
 			if animChunks == 0 {
 				return ErrInvalidChunk // ANIM must precede ANMF
 			}
+			if len(p.frames) >= MaxFrames {
+				return fmt.Errorf("%w: too many animation frames (max %d)", ErrInvalidChunk, MaxFrames)
+			}
 			frame, err := parseANMF(payload)
 			if err != nil {
 				return err
@@ -245,21 +249,32 @@ func (p *Parser) parseVP8XChunks(buf []byte) error {
 
 		case FourCCICCP:
 			if p.features.HasICCP {
+				if payloadSize > MaxMetadataSize {
+					return fmt.Errorf("%w: ICCP chunk too large (%d bytes, max %d)", ErrInvalidChunk, payloadSize, MaxMetadataSize)
+				}
 				p.chunks = append(p.chunks, Chunk{FourCC: fourcc, Payload: copyBytes(payload)})
 			}
 
 		case FourCCEXIF:
 			if p.features.HasEXIF {
+				if payloadSize > MaxMetadataSize {
+					return fmt.Errorf("%w: EXIF chunk too large (%d bytes, max %d)", ErrInvalidChunk, payloadSize, MaxMetadataSize)
+				}
 				p.chunks = append(p.chunks, Chunk{FourCC: fourcc, Payload: copyBytes(payload)})
 			}
 
 		case FourCCXMP:
 			if p.features.HasXMP {
+				if payloadSize > MaxMetadataSize {
+					return fmt.Errorf("%w: XMP chunk too large (%d bytes, max %d)", ErrInvalidChunk, payloadSize, MaxMetadataSize)
+				}
 				p.chunks = append(p.chunks, Chunk{FourCC: fourcc, Payload: copyBytes(payload)})
 			}
 
 		default:
-			// Unknown chunks are stored as-is for roundtrip fidelity.
+			if len(p.chunks) >= MaxChunks {
+				return fmt.Errorf("%w: too many chunks (max %d)", ErrInvalidChunk, MaxChunks)
+			}
 			p.chunks = append(p.chunks, Chunk{FourCC: fourcc, Payload: copyBytes(payload)})
 		}
 

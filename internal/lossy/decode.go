@@ -479,6 +479,13 @@ func (dec *Decoder) initFrame() error {
 	cacheYSize := totalRows * 16 * dec.cacheYStride
 	cacheUSize := totalRows * 8 * dec.cacheUVStride
 	cacheVSize := cacheUSize
+
+	// Validate slab size won't overflow. Max dimensions: mbW=1024, mbH=1024
+	// cacheYSize max = 1024 * 16 * 16384 = 268M, fits in int64.
+	if uint64(totalRows)*16*uint64(dec.cacheYStride) > 1<<30 {
+		return fmt.Errorf("vp8: frame too large")
+	}
+
 	slabSize := intraTSize + yuvBSize + cacheYSize + cacheUSize + cacheVSize
 
 	// Reuse-or-grow the byte slab.

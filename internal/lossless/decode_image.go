@@ -362,12 +362,20 @@ func (dec *Decoder) getMetaIndex(x, y int) int {
 	if dec.hdr.huffmanSubsampleBits == 0 {
 		return 0
 	}
-	return int(dec.hdr.huffmanImage[dec.hdr.huffmanXSize*(y>>dec.hdr.huffmanSubsampleBits)+(x>>dec.hdr.huffmanSubsampleBits)])
+	idx := dec.hdr.huffmanXSize*(y>>dec.hdr.huffmanSubsampleBits) + (x >> dec.hdr.huffmanSubsampleBits)
+	if idx < 0 || idx >= len(dec.hdr.huffmanImage) {
+		return 0
+	}
+	return int(dec.hdr.huffmanImage[idx])
 }
 
 // getHTreeGroup returns the HTreeGroup for pixel position (x, y).
 func (dec *Decoder) getHTreeGroup(x, y int) *HTreeGroup {
-	return &dec.hdr.htreeGroups[dec.getMetaIndex(x, y)]
+	idx := dec.getMetaIndex(x, y)
+	if idx < 0 || idx >= len(dec.hdr.htreeGroups) {
+		return &dec.hdr.htreeGroups[0]
+	}
+	return &dec.hdr.htreeGroups[idx]
 }
 
 // getCopyDistance decodes the distance from a distance symbol.
@@ -632,7 +640,11 @@ func (dec *Decoder) decodeImageData(data []uint32, width, height, lastRow int) e
 					colorCache.Insert(data[lastCached])
 					lastCached++
 				}
-				data[pos] = colorCache.Lookup(key)
+				if key >= 0 && key < len(colorCache.Colors) {
+					data[pos] = colorCache.Lookup(key)
+				} else {
+					return ErrBitstream
+				}
 			}
 			pos++
 			col++

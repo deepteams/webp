@@ -98,6 +98,9 @@ const (
 	MaxDuration      = 1 << 24
 	MaxPositionOff   = 1 << 24
 	MaxChunkPayload  = ^uint32(0) - ChunkHeaderSize - 1
+	MaxFrames        = 10000
+	MaxChunks        = 1000
+	MaxMetadataSize  = 100 * 1024 * 1024 // 100MB
 )
 
 // Intra prediction modes (from common_dec.h).

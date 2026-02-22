@@ -411,6 +411,9 @@ func Encode(w io.Writer, img image.Image, opts *EncoderOptions) error {
 	}
 
 	imgW, imgH := img.Bounds().Dx(), img.Bounds().Dy()
+	if imgW <= 0 || imgH <= 0 {
+		return fmt.Errorf("webp: invalid image dimensions %dx%d", imgW, imgH)
+	}
 	if imgW > MaxDimension || imgH > MaxDimension {
 		return fmt.Errorf("webp: image dimension %dx%d exceeds maximum %d", imgW, imgH, MaxDimension)
 	}
@@ -573,6 +576,20 @@ func encodeLossy(img image.Image, opts *EncoderOptions) ([]byte, uint32, error) 
 	return bs, fourcc, err
 }
 
+// validNRGBA reports whether the NRGBA image's Stride and Pix buffer are
+// consistent with the given width and height. This prevents out-of-bounds
+// reads when accessing raw pixel data in fast-path encoders.
+func validNRGBA(img *image.NRGBA, w, h int) bool {
+	return img.Stride >= w*4 && len(img.Pix) >= (h-1)*img.Stride+w*4
+}
+
+// validRGBA reports whether the RGBA image's Stride and Pix buffer are
+// consistent with the given width and height. This prevents out-of-bounds
+// reads when accessing raw pixel data in fast-path encoders.
+func validRGBA(img *image.RGBA, w, h int) bool {
+	return img.Stride >= w*4 && len(img.Pix) >= (h-1)*img.Stride+w*4
+}
+
 // encodeLossless encodes the image as a VP8L lossless bitstream.
 func encodeLossless(img image.Image, opts *EncoderOptions) ([]byte, uint32, error) {
 	bounds := img.Bounds()
@@ -593,7 +610,7 @@ func encodeLossless(img image.Image, opts *EncoderOptions) ([]byte, uint32, erro
 		ab.data = make([]uint32, pixelCount)
 	}
 	argb := ab.data
-	if nrgba, ok := img.(*image.NRGBA); ok {
+	if nrgba, ok := img.(*image.NRGBA); ok && validNRGBA(nrgba, width, height) {
 		for y := 0; y < height; y++ {
 			rowOff := (y+bounds.Min.Y-nrgba.Rect.Min.Y)*nrgba.Stride + (bounds.Min.X-nrgba.Rect.Min.X)*4
 			for x := 0; x < width; x++ {
@@ -601,7 +618,7 @@ func encodeLossless(img image.Image, opts *EncoderOptions) ([]byte, uint32, erro
 				argb[y*width+x] = uint32(nrgba.Pix[off+3])<<24 | uint32(nrgba.Pix[off])<<16 | uint32(nrgba.Pix[off+1])<<8 | uint32(nrgba.Pix[off+2])
 			}
 		}
-	} else if rgba, ok := img.(*image.RGBA); ok {
+	} else if rgba, ok := img.(*image.RGBA); ok && validRGBA(rgba, width, height) {
 		for y := 0; y < height; y++ {
 			rowOff := (y+bounds.Min.Y-rgba.Rect.Min.Y)*rgba.Stride + (bounds.Min.X-rgba.Rect.Min.X)*4
 			for x := 0; x < width; x++ {
@@ -660,7 +677,7 @@ func encodeLosslessToWriter(w io.Writer, img image.Image, opts *EncoderOptions) 
 		ab.data = make([]uint32, pixelCount)
 	}
 	argb := ab.data
-	if nrgba, ok := img.(*image.NRGBA); ok {
+	if nrgba, ok := img.(*image.NRGBA); ok && validNRGBA(nrgba, width, height) {
 		for y := 0; y < height; y++ {
 			rowOff := (y+bounds.Min.Y-nrgba.Rect.Min.Y)*nrgba.Stride + (bounds.Min.X-nrgba.Rect.Min.X)*4
 			for x := 0; x < width; x++ {
@@ -668,7 +685,7 @@ func encodeLosslessToWriter(w io.Writer, img image.Image, opts *EncoderOptions) 
 				argb[y*width+x] = uint32(nrgba.Pix[off+3])<<24 | uint32(nrgba.Pix[off])<<16 | uint32(nrgba.Pix[off+1])<<8 | uint32(nrgba.Pix[off+2])
 			}
 		}
-	} else if rgba, ok := img.(*image.RGBA); ok {
+	} else if rgba, ok := img.(*image.RGBA); ok && validRGBA(rgba, width, height) {
 		for y := 0; y < height; y++ {
 			rowOff := (y+bounds.Min.Y-rgba.Rect.Min.Y)*rgba.Stride + (bounds.Min.X-rgba.Rect.Min.X)*4
 			for x := 0; x < width; x++ {
@@ -751,13 +768,13 @@ func cleanupTransparentAreaLossyWith(img image.Image, hasAlpha bool) image.Image
 
 	// Convert to NRGBA so we can modify pixels in place.
 	nrgba := image.NewNRGBA(image.Rect(0, 0, width, height))
-	if src, ok := img.(*image.NRGBA); ok {
+	if src, ok := img.(*image.NRGBA); ok && validNRGBA(src, width, height) {
 		for y := 0; y < height; y++ {
 			srcOff := (y+bounds.Min.Y-src.Rect.Min.Y)*src.Stride + (bounds.Min.X-src.Rect.Min.X)*4
 			dstOff := y * nrgba.Stride
 			copy(nrgba.Pix[dstOff:dstOff+width*4], src.Pix[srcOff:srcOff+width*4])
 		}
-	} else if src, ok := img.(*image.RGBA); ok {
+	} else if src, ok := img.(*image.RGBA); ok && validRGBA(src, width, height) {
 		for y := 0; y < height; y++ {
 			srcOff := (y+bounds.Min.Y-src.Rect.Min.Y)*src.Stride + (bounds.Min.X-src.Rect.Min.X)*4
 			dstOff := y * nrgba.Stride
@@ -1081,10 +1098,11 @@ func putLE24(buf []byte, v uint32) {
 // imageHasAlpha reports whether the image has any pixel with alpha < 255.
 func imageHasAlpha(img image.Image) bool {
 	b := img.Bounds()
-	if nrgba, ok := img.(*image.NRGBA); ok {
+	w, h := b.Dx(), b.Dy()
+	if nrgba, ok := img.(*image.NRGBA); ok && validNRGBA(nrgba, w, h) {
 		for y := b.Min.Y; y < b.Max.Y; y++ {
 			off := (y-b.Min.Y)*nrgba.Stride + 3 // alpha offset in first pixel
-			for x := 0; x < b.Dx(); x++ {
+			for x := 0; x < w; x++ {
 				if nrgba.Pix[off] != 255 {
 					return true
 				}
@@ -1093,10 +1111,10 @@ func imageHasAlpha(img image.Image) bool {
 		}
 		return false
 	}
-	if rgba, ok := img.(*image.RGBA); ok {
+	if rgba, ok := img.(*image.RGBA); ok && validRGBA(rgba, w, h) {
 		for y := b.Min.Y; y < b.Max.Y; y++ {
 			off := (y-b.Min.Y)*rgba.Stride + 3
-			for x := 0; x < b.Dx(); x++ {
+			for x := 0; x < w; x++ {
 				if rgba.Pix[off] != 255 {
 					return true
 				}
@@ -1129,7 +1147,7 @@ func sharpYUVConvert(img image.Image) (*image.YCbCr, error) {
 	// Convert to packed RGB (3 bytes per pixel, row-major).
 	rgbStride := w * 3
 	rgb := make([]byte, h*rgbStride)
-	if nrgba, ok := img.(*image.NRGBA); ok {
+	if nrgba, ok := img.(*image.NRGBA); ok && validNRGBA(nrgba, w, h) {
 		for y := 0; y < h; y++ {
 			srcOff := (y+bounds.Min.Y-nrgba.Rect.Min.Y)*nrgba.Stride + (bounds.Min.X-nrgba.Rect.Min.X)*4
 			dstOff := y * rgbStride
@@ -1141,7 +1159,7 @@ func sharpYUVConvert(img image.Image) (*image.YCbCr, error) {
 				dstOff += 3
 			}
 		}
-	} else if rgba, ok := img.(*image.RGBA); ok {
+	} else if rgba, ok := img.(*image.RGBA); ok && validRGBA(rgba, w, h) {
 		for y := 0; y < h; y++ {
 			srcOff := (y+bounds.Min.Y-rgba.Rect.Min.Y)*rgba.Stride + (bounds.Min.X-rgba.Rect.Min.X)*4
 			dstOff := y * rgbStride
@@ -1189,7 +1207,7 @@ func extractAlphaWith(img image.Image, hasAlpha bool) []byte {
 	b := img.Bounds()
 	w, h := b.Dx(), b.Dy()
 	alpha := make([]byte, w*h)
-	if nrgba, ok := img.(*image.NRGBA); ok {
+	if nrgba, ok := img.(*image.NRGBA); ok && validNRGBA(nrgba, w, h) {
 		for y := 0; y < h; y++ {
 			rowOff := (y+b.Min.Y-nrgba.Rect.Min.Y)*nrgba.Stride + (b.Min.X-nrgba.Rect.Min.X)*4 + 3
 			for x := 0; x < w; x++ {
@@ -1199,7 +1217,7 @@ func extractAlphaWith(img image.Image, hasAlpha bool) []byte {
 		}
 		return alpha
 	}
-	if rgba, ok := img.(*image.RGBA); ok {
+	if rgba, ok := img.(*image.RGBA); ok && validRGBA(rgba, w, h) {
 		for y := 0; y < h; y++ {
 			rowOff := (y+b.Min.Y-rgba.Rect.Min.Y)*rgba.Stride + (b.Min.X-rgba.Rect.Min.X)*4 + 3
 			for x := 0; x < w; x++ {

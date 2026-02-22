@@ -402,18 +402,26 @@ func (d *AnimDecoder) Canvas() *image.NRGBA {
 }
 
 // compositeFrame blends the frame onto the current canvas.
+// Frame bounds are clamped to the canvas dimensions to prevent out-of-bounds access.
 func (d *AnimDecoder) compositeFrame(f *Frame) {
 	src := toNRGBA(f.Image)
 	rect := f.Bounds()
 	srcBounds := src.Bounds()
 
+	// Clamp frame bounds to canvas dimensions to prevent out-of-bounds writes.
+	canvasBounds := d.currFrame.Bounds()
+	rect = rect.Intersect(canvasBounds)
+	if rect.Empty() {
+		return
+	}
+
 	for y := rect.Min.Y; y < rect.Max.Y; y++ {
-		sy := y - rect.Min.Y
+		sy := y - f.OffsetY
 		if sy < 0 || sy >= srcBounds.Dy() {
 			continue
 		}
 		for x := rect.Min.X; x < rect.Max.X; x++ {
-			sx := x - rect.Min.X
+			sx := x - f.OffsetX
 			if sx < 0 || sx >= srcBounds.Dx() {
 				continue
 			}

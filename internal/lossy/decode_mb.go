@@ -291,7 +291,7 @@ func (dec *Decoder) decodeMB(tokenBR *bitio.BoolReader) error {
 	// Store filter info.
 	if dec.filterType > 0 {
 		finfo := &dec.fInfo[dec.mbX]
-		*finfo = dec.fstrengths[block.Segment][b2i(block.IsI4x4)]
+		*finfo = dec.fstrengths[block.Segment&3][b2i(block.IsI4x4)]
 		finfo.FInner = finfo.FInner || !skip
 	}
 
@@ -312,7 +312,7 @@ func b2i(b bool) int {
 // parseResiduals decodes all residual coefficients for one macroblock.
 func (dec *Decoder) parseResiduals(mb, leftMB *MB, block *MBData, tokenBR *bitio.BoolReader) {
 	bands := &dec.proba.BandsPtr
-	q := &dec.dqm[block.Segment]
+	q := &dec.dqm[block.Segment&3]
 	dst := block.Coeffs[:]
 
 	// Zero out all coefficients.

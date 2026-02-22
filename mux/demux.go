@@ -98,16 +98,26 @@ type Demuxer struct {
 	loopCount int
 }
 
+// maxMetadataSize is the maximum allowed size for a single metadata chunk
+// (ICC, EXIF, XMP) to prevent memory exhaustion from malicious inputs.
+const maxMetadataSize = 100 * 1024 * 1024 // 100 MB
+
+// maxFrames is the maximum number of animation frames allowed to prevent
+// memory exhaustion from malicious inputs.
+const maxFrames = 10000
+
 var (
-	ErrInvalidRIFF   = errors.New("mux: not a valid WebP file (bad RIFF header)")
-	ErrTruncated     = errors.New("mux: data truncated")
-	ErrNoImage       = errors.New("mux: no image data found")
-	ErrInvalidVP8X   = errors.New("mux: invalid VP8X chunk")
-	ErrInvalidANIM   = errors.New("mux: invalid ANIM chunk")
-	ErrInvalidANMF   = errors.New("mux: invalid ANMF chunk")
-	ErrInvalidFrame  = errors.New("mux: invalid frame bitstream")
-	ErrFrameOutRange = errors.New("mux: frame index out of range")
-	ErrChunkNotFound = errors.New("mux: chunk not found")
+	ErrInvalidRIFF    = errors.New("mux: not a valid WebP file (bad RIFF header)")
+	ErrTruncated      = errors.New("mux: data truncated")
+	ErrNoImage        = errors.New("mux: no image data found")
+	ErrInvalidVP8X    = errors.New("mux: invalid VP8X chunk")
+	ErrInvalidANIM    = errors.New("mux: invalid ANIM chunk")
+	ErrInvalidANMF    = errors.New("mux: invalid ANMF chunk")
+	ErrInvalidFrame   = errors.New("mux: invalid frame bitstream")
+	ErrFrameOutRange  = errors.New("mux: frame index out of range")
+	ErrChunkNotFound  = errors.New("mux: chunk not found")
+	ErrMetadataTooLarge = errors.New("mux: metadata chunk too large")
+	ErrTooManyFrames  = errors.New("mux: too many frames")
 )
 
 // NewDemuxer parses a WebP file from data and returns a Demuxer.
@@ -332,10 +342,19 @@ func (d *Demuxer) parseExtended(payload []byte) error {
 		d.chunks = append(d.chunks, c)
 		switch c.ID {
 		case FourCCICCP:
+			if len(c.Data) > maxMetadataSize {
+				return fmt.Errorf("%w: ICCP chunk %d bytes, max %d", ErrMetadataTooLarge, len(c.Data), maxMetadataSize)
+			}
 			d.iccData = c.Data
 		case FourCCEXIF:
+			if len(c.Data) > maxMetadataSize {
+				return fmt.Errorf("%w: EXIF chunk %d bytes, max %d", ErrMetadataTooLarge, len(c.Data), maxMetadataSize)
+			}
 			d.exifData = c.Data
 		case FourCCXMP:
+			if len(c.Data) > maxMetadataSize {
+				return fmt.Errorf("%w: XMP chunk %d bytes, max %d", ErrMetadataTooLarge, len(c.Data), maxMetadataSize)
+			}
 			d.xmpData = c.Data
 		case FourCCANIM:
 			if err := d.parseANIM(c.Data); err != nil {
@@ -429,6 +448,10 @@ func (d *Demuxer) parseANMF(data []byte) error {
 	hasAlpha := len(alphaData) > 0
 	if !hasAlpha && len(imageData) > 0 {
 		hasAlpha = frameDataHasAlpha(imageData)
+	}
+
+	if len(d.frames) >= maxFrames {
+		return fmt.Errorf("%w: exceeded limit of %d", ErrTooManyFrames, maxFrames)
 	}
 
 	fi := FrameInfo{

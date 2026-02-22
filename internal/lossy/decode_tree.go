@@ -147,6 +147,9 @@ func (dec *Decoder) parseIntraModeRow() error {
 						i = int(KYModesIntra4[2*i+bit])
 					}
 					ymode = uint8(-i)
+					if ymode >= 10 { // NumBModes
+						ymode = 0
+					}
 					top[x] = ymode
 					modes[y*4+x] = ymode
 				}

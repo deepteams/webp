@@ -73,11 +73,15 @@ func DecodeAlpha(data []byte, width, height int) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("alpha: VP8L decode failed: %w", err)
 		}
+		// Validate that the decoded image dimensions match expectations.
+		bounds := alphaImage.Bounds()
+		if bounds.Dx() < width || bounds.Dy() < height {
+			return nil, fmt.Errorf("alpha: decoded image %dx%d smaller than expected %dx%d", bounds.Dx(), bounds.Dy(), width, height)
+		}
 		// Extract the green channel as the alpha plane.
 		raw = make([]byte, planeSize)
-		bounds := alphaImage.Bounds()
-		for y := 0; y < height && y < bounds.Dy(); y++ {
-			for x := 0; x < width && x < bounds.Dx(); x++ {
+		for y := 0; y < height; y++ {
+			for x := 0; x < width; x++ {
 				off := alphaImage.PixOffset(x, y)
 				// Green channel is at offset 1 in NRGBA (R=0, G=1, B=2, A=3).
 				raw[y*width+x] = alphaImage.Pix[off+1]

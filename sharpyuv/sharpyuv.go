@@ -36,7 +36,7 @@ func DefaultOptions() *Options {
 // to the provided YCbCr image which must be allocated with 4:2:0 subsampling
 // and matching dimensions.
 func Convert(rgb []byte, width, height, rgbStride int, yuv *image.YCbCr, opts *Options) error {
-	if width < 1 || height < 1 {
+	if width <= 0 || height <= 0 || rgbStride <= 0 {
 		return errors.New("sharpyuv: invalid dimensions")
 	}
 	if yuv == nil {
@@ -51,7 +51,8 @@ func Convert(rgb []byte, width, height, rgbStride int, yuv *image.YCbCr, opts *O
 	if opts.Matrix == nil {
 		return errors.New("sharpyuv: nil conversion matrix")
 	}
-	if len(rgb) < (height-1)*rgbStride+width*3 {
+	// Use uint64 arithmetic to prevent integer overflow in buffer size check.
+	if uint64(height-1)*uint64(rgbStride)+uint64(width)*3 > uint64(len(rgb)) {
 		return errors.New("sharpyuv: rgb buffer too small")
 	}
 

@@ -2029,3 +2029,125 @@ func TestOptionsForPreset_Override(t *testing.T) {
 		t.Fatalf("decoded size = %dx%d, want 32x32", decoded.Bounds().Dx(), decoded.Bounds().Dy())
 	}
 }
+
+// --- Security validation tests ---
+
+func TestEncode_ZeroDimensions(t *testing.T) {
+	tests := []struct {
+		name string
+		img  image.Image
+	}{
+		{"zero width", image.NewNRGBA(image.Rect(0, 0, 0, 10))},
+		{"zero height", image.NewNRGBA(image.Rect(0, 0, 10, 0))},
+		{"both zero", image.NewNRGBA(image.Rect(0, 0, 0, 0))},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name+"_lossy", func(t *testing.T) {
+			var buf bytes.Buffer
+			err := Encode(&buf, tt.img, &EncoderOptions{Quality: 75})
+			if err == nil {
+				t.Fatal("expected error for zero/negative dimensions, got nil")
+			}
+			if !strings.Contains(err.Error(), "invalid image dimensions") {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+		t.Run(tt.name+"_lossless", func(t *testing.T) {
+			var buf bytes.Buffer
+			err := Encode(&buf, tt.img, &EncoderOptions{Lossless: true, Quality: 75})
+			if err == nil {
+				t.Fatal("expected error for zero/negative dimensions, got nil")
+			}
+			if !strings.Contains(err.Error(), "invalid image dimensions") {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestEncode_ExceedMaxDimension(t *testing.T) {
+	// MaxDimension+1 should be rejected.
+	bigImg := image.NewNRGBA(image.Rect(0, 0, MaxDimension+1, 1))
+	var buf bytes.Buffer
+	err := Encode(&buf, bigImg, &EncoderOptions{Quality: 75})
+	if err == nil {
+		t.Fatal("expected error for dimension > MaxDimension, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds maximum") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestValidNRGBA(t *testing.T) {
+	// Normal image created by image.NewNRGBA should always be valid.
+	img := image.NewNRGBA(image.Rect(0, 0, 16, 16))
+	if !validNRGBA(img, 16, 16) {
+		t.Error("image.NewNRGBA should be valid")
+	}
+
+	// Manually constructed with insufficient Pix buffer.
+	malformed := &image.NRGBA{
+		Pix:    make([]byte, 10), // way too small for 16x16
+		Stride: 64,
+		Rect:   image.Rect(0, 0, 16, 16),
+	}
+	if validNRGBA(malformed, 16, 16) {
+		t.Error("malformed NRGBA with small Pix buffer should be invalid")
+	}
+
+	// Stride too small.
+	badStride := &image.NRGBA{
+		Pix:    make([]byte, 16*16*4),
+		Stride: 4, // only 1 pixel wide, need 16
+		Rect:   image.Rect(0, 0, 16, 16),
+	}
+	if validNRGBA(badStride, 16, 16) {
+		t.Error("NRGBA with too-small stride should be invalid")
+	}
+}
+
+func TestValidRGBA(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 16, 16))
+	if !validRGBA(img, 16, 16) {
+		t.Error("image.NewRGBA should be valid")
+	}
+
+	malformed := &image.RGBA{
+		Pix:    make([]byte, 10),
+		Stride: 64,
+		Rect:   image.Rect(0, 0, 16, 16),
+	}
+	if validRGBA(malformed, 16, 16) {
+		t.Error("malformed RGBA with small Pix buffer should be invalid")
+	}
+}
+
+func TestEncode_MalformedNRGBA_FallsToGenericPath(t *testing.T) {
+	// Create a malformed NRGBA that has correct Bounds() but bad Stride.
+	// The encoder should fall through to the safe generic img.At() path
+	// because validNRGBA fails.
+	inner := solidImage(4, 4, color.NRGBA{R: 100, G: 200, B: 50, A: 255})
+
+	// Manually set stride to something wrong to trigger fallback.
+	malformed := &image.NRGBA{
+		Pix:    inner.Pix,
+		Stride: 4, // too small (should be 16)
+		Rect:   inner.Rect,
+	}
+
+	var buf bytes.Buffer
+	err := Encode(&buf, malformed, &EncoderOptions{Lossless: true, Quality: 75})
+	if err != nil {
+		t.Fatalf("Encode with malformed NRGBA: %v", err)
+	}
+
+	// The generic path uses img.At() which respects the actual Pix layout,
+	// so decoding should produce a valid (though possibly garbled) image.
+	decoded, err := Decode(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if decoded.Bounds().Dx() != 4 || decoded.Bounds().Dy() != 4 {
+		t.Fatalf("decoded size = %dx%d, want 4x4", decoded.Bounds().Dx(), decoded.Bounds().Dy())
+	}
+}
