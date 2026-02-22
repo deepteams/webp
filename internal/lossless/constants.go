@@ -158,6 +158,10 @@ func PlaneCodeToDistance(xsize int, planeCode int) int {
 	distCode := CodeToPlane[planeCode-1]
 	yoffset := int(distCode >> 4)
 	xoffset := 8 - int(distCode&0xf)
+	// Guard against overflow in yoffset*xsize.
+	if yoffset > 0 && xsize > (1<<30)/yoffset {
+		return 1
+	}
 	dist := yoffset*xsize + xoffset
 	if dist < 1 {
 		return 1

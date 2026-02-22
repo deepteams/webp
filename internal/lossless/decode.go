@@ -284,7 +284,7 @@ func (dec *Decoder) decodeImageStream(xsize, ysize int, isLevel0 bool) error {
 // and returns the decoded ARGB pixels.
 func (dec *Decoder) decodeSubImage(xsize, ysize int) ([]uint32, error) {
 	dec.recursionDepth++
-	if dec.recursionDepth > 3 {
+	if dec.recursionDepth > 2 {
 		return nil, ErrBitstream
 	}
 	defer func() { dec.recursionDepth-- }()
@@ -299,6 +299,11 @@ func (dec *Decoder) decodeSubImage(xsize, ysize int) ([]uint32, error) {
 		return nil, err
 	}
 
+	// Guard against integer overflow in dimension multiplication.
+	if xsize > 0 && ysize > (1<<30)/xsize {
+		dec.hdr = savedHdr
+		return nil, ErrBitstream
+	}
 	totalSize := xsize * ysize
 	data := make([]uint32, totalSize)
 

@@ -564,8 +564,15 @@ func clampLoopCount(v int) int {
 	return v
 }
 
+// maxCanvasDimension is the maximum allowed canvas dimension for WebP (16383).
+const maxCanvasDimension = 16383
+
 // NewEncoder creates a new AnimEncoder.
+// Returns nil if canvas dimensions are invalid.
 func NewEncoder(w io.Writer, canvasWidth, canvasHeight int, opts *EncodeOptions) *AnimEncoder {
+	if canvasWidth <= 0 || canvasHeight <= 0 || canvasWidth > maxCanvasDimension || canvasHeight > maxCanvasDimension {
+		return nil
+	}
 	m := mux.NewMuxer()
 	enc := &AnimEncoder{
 		w:      w,

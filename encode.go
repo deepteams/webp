@@ -6,6 +6,7 @@ import (
 	"image"
 	"image/color"
 	"io"
+	"math"
 	"sync"
 
 	"github.com/deepteams/webp/internal/container"
@@ -256,8 +257,8 @@ func OptionsForPreset(preset Preset, quality float32) *EncoderOptions {
 // Negative values are valid sentinels for most int fields (treated as
 // C defaults), so only the upper bound (or resolved range) is checked.
 func validateConfig(opts *EncoderOptions) error {
-	if opts.Quality < 0 || opts.Quality > 100 {
-		return fmt.Errorf("webp: invalid Quality %.2f (must be 0-100)", opts.Quality)
+	if opts.Quality < 0 || opts.Quality > 100 || math.IsNaN(float64(opts.Quality)) || math.IsInf(float64(opts.Quality), 0) {
+		return fmt.Errorf("webp: invalid Quality %.2f (must be 0-100, finite)", opts.Quality)
 	}
 	if opts.Method < 0 || opts.Method > 6 {
 		return fmt.Errorf("webp: invalid Method %d (must be 0-6)", opts.Method)
@@ -265,8 +266,11 @@ func validateConfig(opts *EncoderOptions) error {
 	if opts.TargetSize < 0 {
 		return fmt.Errorf("webp: invalid TargetSize %d (must be >= 0)", opts.TargetSize)
 	}
-	if opts.TargetPSNR < 0 {
-		return fmt.Errorf("webp: invalid TargetPSNR %.2f (must be >= 0)", opts.TargetPSNR)
+	if opts.TargetPSNR < 0 || math.IsNaN(float64(opts.TargetPSNR)) || math.IsInf(float64(opts.TargetPSNR), 0) {
+		return fmt.Errorf("webp: invalid TargetPSNR %.2f (must be >= 0, finite)", opts.TargetPSNR)
+	}
+	if opts.Preprocessing < 0 || opts.Preprocessing > 3 {
+		return fmt.Errorf("webp: invalid Preprocessing %d (must be 0-3)", opts.Preprocessing)
 	}
 	if opts.Preset < PresetDefault || opts.Preset > PresetText {
 		return fmt.Errorf("webp: invalid Preset %d", opts.Preset)
@@ -999,29 +1003,34 @@ func writeRIFFExtended(w io.Writer, fourcc uint32, bitstreamData, alphaData []by
 		flags |= 0x00000004 // bit 2 = XMP
 	}
 
-	// Helper: padded chunk size (header + data + padding).
-	paddedChunkSize := func(dataLen int) uint32 {
-		n := uint32(dataLen)
-		return container.ChunkHeaderSize + n + (n & 1)
+	// Helper: padded chunk size (header + data + padding), using uint64 to prevent overflow.
+	paddedChunkSize64 := func(dataLen int) uint64 {
+		n := uint64(dataLen)
+		return uint64(container.ChunkHeaderSize) + n + (n & 1)
 	}
 
-	// Calculate total RIFF payload.
-	riffSize := uint32(4) + // "WEBP"
-		container.ChunkHeaderSize + vp8xChunkSize // VP8X
+	// Calculate total RIFF payload using uint64 to detect overflow.
+	riffSize64 := uint64(4) + // "WEBP"
+		uint64(container.ChunkHeaderSize) + uint64(vp8xChunkSize) // VP8X
 
 	if len(icc) > 0 {
-		riffSize += paddedChunkSize(len(icc))
+		riffSize64 += paddedChunkSize64(len(icc))
 	}
 	if len(alphaData) > 0 {
-		riffSize += paddedChunkSize(len(alphaData))
+		riffSize64 += paddedChunkSize64(len(alphaData))
 	}
-	riffSize += paddedChunkSize(len(bitstreamData))
+	riffSize64 += paddedChunkSize64(len(bitstreamData))
 	if len(exif) > 0 {
-		riffSize += paddedChunkSize(len(exif))
+		riffSize64 += paddedChunkSize64(len(exif))
 	}
 	if len(xmp) > 0 {
-		riffSize += paddedChunkSize(len(xmp))
+		riffSize64 += paddedChunkSize64(len(xmp))
 	}
+
+	if riffSize64 > uint64(math.MaxUint32)-8 {
+		return fmt.Errorf("webp: RIFF payload too large (%d bytes)", riffSize64)
+	}
+	riffSize := uint32(riffSize64)
 
 	totalSize := 8 + riffSize
 	buf := make([]byte, totalSize)
@@ -1145,7 +1154,14 @@ func sharpYUVConvert(img image.Image) (*image.YCbCr, error) {
 	h := bounds.Dy()
 
 	// Convert to packed RGB (3 bytes per pixel, row-major).
+	// Guard against integer overflow in stride/buffer calculation.
+	if w > math.MaxInt/3 {
+		return nil, fmt.Errorf("webp: image too wide for SharpYUV: %d", w)
+	}
 	rgbStride := w * 3
+	if h > math.MaxInt/rgbStride {
+		return nil, fmt.Errorf("webp: image too large for SharpYUV: %dx%d", w, h)
+	}
 	rgb := make([]byte, h*rgbStride)
 	if nrgba, ok := img.(*image.NRGBA); ok && validNRGBA(nrgba, w, h) {
 		for y := 0; y < h; y++ {

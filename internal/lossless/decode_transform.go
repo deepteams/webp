@@ -89,6 +89,11 @@ func expandColorMap(numColors, bits int, palette []uint32) []uint32 {
 	oldBytes := argbSliceToBytes(palette)
 	newBytes := argbSliceToBytes(newMap)
 
+	// Validate palette has enough entries (defense against truncated sub-image).
+	if len(palette) < numColors {
+		numColors = len(palette)
+	}
+
 	for i := 4; i < 4*numColors; i++ {
 		newBytes[i] = (oldBytes[i] + newBytes[i-4]) & 0xff
 	}
@@ -217,6 +222,12 @@ func predictorInverseTransform(t *Transform, yStart, yEnd int, in, out []uint32)
 	tileMask := tileWidth - 1
 	tilesPerRow := VP8LSubSampleSize(width, t.Bits)
 	tData := t.Data
+
+	// Validate transform data bounds to prevent OOB from truncated sub-images.
+	tilesPerCol := VP8LSubSampleSize(yEnd, t.Bits)
+	if len(tData) < tilesPerRow*tilesPerCol {
+		return // silently skip if data is truncated (defensive)
+	}
 
 	for y := yStart; y < yEnd; y++ {
 		predModeRow := (y >> t.Bits) * tilesPerRow
@@ -447,6 +458,17 @@ func colorSpaceInverseTransform(t *Transform, yStart, yEnd int, src, dst []uint3
 	remainingWidth := width - safeWidth
 	tilesPerRow := VP8LSubSampleSize(width, t.Bits)
 	tData := t.Data
+
+	// Validate transform data bounds to prevent OOB from truncated sub-images.
+	tilesPerCol := VP8LSubSampleSize(yEnd, t.Bits)
+	if len(tData) < tilesPerRow*tilesPerCol {
+		// Truncated transform data; copy src to dst unchanged (defensive).
+		n := (yEnd - yStart) * width
+		if len(src) >= n && len(dst) >= n {
+			copy(dst[:n], src[:n])
+		}
+		return
+	}
 
 	srcOff := yStart * width
 	dstOff := yStart * width

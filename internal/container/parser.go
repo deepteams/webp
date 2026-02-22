@@ -97,8 +97,8 @@ func (p *Parser) parseSingleImage(buf []byte) error {
 	if err != nil {
 		return err
 	}
-	padded := int(PaddedSize(payloadSize))
-	if ChunkHeaderSize+padded > len(buf) {
+	padded64 := uint64(payloadSize) + uint64(payloadSize&1)
+	if uint64(ChunkHeaderSize)+padded64 > uint64(len(buf)) {
 		return ErrTruncated
 	}
 
@@ -149,8 +149,8 @@ func (p *Parser) parseVP8X(buf []byte) error {
 		return ErrInvalidVP8X
 	}
 
-	padded := int(PaddedSize(payloadSize))
-	if ChunkHeaderSize+padded > len(buf) {
+	padded64 := uint64(payloadSize) + uint64(payloadSize&1)
+	if uint64(ChunkHeaderSize)+padded64 > uint64(len(buf)) {
 		return ErrTruncated
 	}
 
@@ -179,7 +179,7 @@ func (p *Parser) parseVP8X(buf []byte) error {
 	}
 
 	// Advance past VP8X chunk.
-	pos := ChunkHeaderSize + padded
+	pos := ChunkHeaderSize + int(padded64)
 
 	// Default animation values.
 	p.features.LoopCount = 1
@@ -199,11 +199,12 @@ func (p *Parser) parseVP8XChunks(buf []byte) error {
 		if err != nil {
 			return err
 		}
-		padded := int(PaddedSize(payloadSize))
-		chunkTotal := ChunkHeaderSize + padded
-		if chunkTotal > len(buf) {
+		padded64 := uint64(payloadSize) + uint64(payloadSize&1)
+		chunkTotal64 := uint64(ChunkHeaderSize) + padded64
+		if chunkTotal64 > uint64(len(buf)) {
 			return ErrTruncated
 		}
+		chunkTotal := int(chunkTotal64)
 
 		payload := buf[ChunkHeaderSize : ChunkHeaderSize+int(payloadSize)]
 
@@ -295,11 +296,12 @@ func (p *Parser) parseExtSingleImage(buf []byte) error {
 		if err != nil {
 			return err
 		}
-		padded := int(PaddedSize(payloadSize))
-		chunkTotal := ChunkHeaderSize + padded
-		if chunkTotal > len(buf) {
+		padded64 := uint64(payloadSize) + uint64(payloadSize&1)
+		chunkTotal64 := uint64(ChunkHeaderSize) + padded64
+		if chunkTotal64 > uint64(len(buf)) {
 			return ErrTruncated
 		}
+		chunkTotal := int(chunkTotal64)
 
 		payload := buf[ChunkHeaderSize : ChunkHeaderSize+int(payloadSize)]
 
@@ -397,11 +399,12 @@ func parseFrameSubChunks(frame FrameInfo, buf []byte) (FrameInfo, error) {
 		if err != nil {
 			return FrameInfo{}, err
 		}
-		padded := int(PaddedSize(payloadSize))
-		chunkTotal := ChunkHeaderSize + padded
-		if chunkTotal > len(buf) {
+		padded64 := uint64(payloadSize) + uint64(payloadSize&1)
+		chunkTotal64 := uint64(ChunkHeaderSize) + padded64
+		if chunkTotal64 > uint64(len(buf)) {
 			return FrameInfo{}, ErrTruncated
 		}
+		chunkTotal := int(chunkTotal64)
 
 		payload := buf[ChunkHeaderSize : ChunkHeaderSize+int(payloadSize)]
 

@@ -200,6 +200,10 @@ func BuildHuffmanTableScratch(rootBits int, codeLengths []int, scratch *HuffmanT
 				tableOff += tableSize
 				tableBits = nextTableBitSize(count[:], l, rootBits)
 				tableSize = 1 << tableBits
+				// Bounds check: ensure sub-table fits in allocated table.
+				if tableOff+tableSize > totalSize {
+					return nil, ErrInvalidTree
+				}
 				low = key & mask
 				rootTable[low] = HuffmanCode{
 					Bits:  uint8(tableBits + rootBits),
@@ -211,7 +215,11 @@ func BuildHuffmanTableScratch(rootBits int, codeLengths []int, scratch *HuffmanT
 				Value: sorted[symbol],
 			}
 			symbol++
-			replicateValue(table[tableOff+(int(key>>uint(rootBits))):], step, tableSize, code)
+			off := tableOff + int(key>>uint(rootBits))
+			if off >= totalSize {
+				return nil, ErrInvalidTree
+			}
+			replicateValue(table[off:], step, tableSize, code)
 			key = getNextKey(key, l)
 		}
 	}

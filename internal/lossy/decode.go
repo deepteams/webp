@@ -421,7 +421,7 @@ func (dec *Decoder) parsePartitions(buf []byte) error {
 	for p := 0; p < lastPart; p++ {
 		psize := int(sz[0]) | int(sz[1])<<8 | int(sz[2])<<16
 		if psize > sizeLeft {
-			psize = sizeLeft
+			return fmt.Errorf("vp8: partition %d size %d exceeds remaining data %d", p, psize, sizeLeft)
 		}
 		dec.parts[p] = bitio.NewBoolReader(partStart[:psize])
 		partStart = partStart[psize:]
@@ -482,7 +482,7 @@ func (dec *Decoder) initFrame() error {
 
 	// Validate slab size won't overflow. Max dimensions: mbW=1024, mbH=1024
 	// cacheYSize max = 1024 * 16 * 16384 = 268M, fits in int64.
-	if uint64(totalRows)*16*uint64(dec.cacheYStride) > 1<<30 {
+	if uint64(totalRows)*16*uint64(dec.cacheYStride) > 1<<28 {
 		return fmt.Errorf("vp8: frame too large")
 	}
 

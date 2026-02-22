@@ -183,6 +183,10 @@ func (dec *Decoder) readHuffmanCodes(xsize, ysize, colorCacheBits int, allowRecu
 		huffmanPrecision := MinHuffmanBits + int(dec.br.ReadBits(NumHuffmanBits))
 		huffmanXSize := VP8LSubSampleSize(xsize, huffmanPrecision)
 		huffmanYSize := VP8LSubSampleSize(ysize, huffmanPrecision)
+		// Guard against integer overflow in dimension multiplication.
+		if huffmanXSize > 0 && huffmanYSize > (1<<30)/huffmanXSize {
+			return ErrBitstream
+		}
 		huffmanPixs := huffmanXSize * huffmanYSize
 
 		subImage, err := dec.decodeSubImage(huffmanXSize, huffmanYSize)

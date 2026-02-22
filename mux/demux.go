@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/deepteams/webp/internal/container"
 )
@@ -225,11 +226,16 @@ func (d *Demuxer) parse() error {
 		return ErrInvalidRIFF
 	}
 	// fileSize is the size after the first 8 bytes (RIFF + size field).
-	totalSize := int(fileSize) + 8
-	if totalSize > len(d.data) {
+	// Use uint64 arithmetic to prevent int overflow on 32-bit platforms.
+	totalSize64 := uint64(fileSize) + 8
+	if totalSize64 > uint64(len(d.data)) {
 		// Allow truncated data — work with what we have.
-		totalSize = len(d.data)
+		totalSize64 = uint64(len(d.data))
 	}
+	if totalSize64 > uint64(math.MaxInt) {
+		return ErrTruncated
+	}
+	totalSize := int(totalSize64)
 	payload := d.data[container.RIFFHeaderSize:totalSize]
 
 	// Parse the first chunk to determine format.
@@ -403,6 +409,11 @@ func (d *Demuxer) parseANMF(data []byte) error {
 	duration := int(data[12]) | int(data[13])<<8 | int(data[14])<<16
 	flagByte := data[15]
 
+	// Validate frame area to prevent excessive memory allocation.
+	if uint64(width)*uint64(height) >= container.MaxImageArea {
+		return fmt.Errorf("%w: frame dimensions %dx%d too large", ErrInvalidANMF, width, height)
+	}
+
 	dispose := DisposeNone
 	if flagByte&0x01 != 0 {
 		dispose = DisposeBackground
@@ -423,10 +434,12 @@ func (d *Demuxer) parseANMF(data []byte) error {
 		if err != nil {
 			break
 		}
-		subEnd := container.ChunkHeaderSize + int(subSize)
-		if subEnd > len(framePayload[pos:]) {
+		// Use uint64 to prevent int overflow on 32-bit platforms.
+		subEnd64 := uint64(container.ChunkHeaderSize) + uint64(subSize)
+		if subEnd64 > uint64(len(framePayload[pos:])) {
 			break
 		}
+		subEnd := int(subEnd64)
 		subData := framePayload[pos+container.ChunkHeaderSize : pos+subEnd]
 
 		switch subID {
@@ -438,6 +451,9 @@ func (d *Demuxer) parseANMF(data []byte) error {
 		advance := subEnd
 		if subSize%2 != 0 && pos+advance < len(framePayload) {
 			advance++
+		}
+		if advance <= 0 {
+			break
 		}
 		pos += advance
 	}

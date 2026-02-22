@@ -2,6 +2,7 @@ package sharpyuv
 
 import (
 	"errors"
+	"fmt"
 	"image"
 )
 
@@ -171,6 +172,12 @@ func convertSharp(rgb []byte, width, height, rgbStride int, yuv *image.YCbCr, ma
 
 	w := (width + 1) & ^1  // round up to even
 	h := (height + 1) & ^1
+
+	// Guard against integer overflow in buffer size calculations.
+	if w > 0 && h > (1<<30)/w {
+		return fmt.Errorf("sharpyuv: image too large (%dx%d)", width, height)
+	}
+
 	uvW := w >> 1
 	uvH := h >> 1
 	sfix := getPrecisionShift(8) // 8-bit RGB input

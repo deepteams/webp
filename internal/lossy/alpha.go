@@ -80,11 +80,15 @@ func DecodeAlpha(data []byte, width, height int) ([]byte, error) {
 		}
 		// Extract the green channel as the alpha plane.
 		raw = make([]byte, planeSize)
+		pix := alphaImage.Pix
 		for y := 0; y < height; y++ {
 			for x := 0; x < width; x++ {
 				off := alphaImage.PixOffset(x, y)
 				// Green channel is at offset 1 in NRGBA (R=0, G=1, B=2, A=3).
-				raw[y*width+x] = alphaImage.Pix[off+1]
+				if off+1 >= len(pix) {
+					return nil, fmt.Errorf("alpha: pixel offset out of bounds at (%d,%d)", x, y)
+				}
+				raw[y*width+x] = pix[off+1]
 			}
 		}
 
