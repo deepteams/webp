@@ -11,6 +11,7 @@ compare
 # Test output
 *.webp
 !testdata/*.webp
+!testdata/**/*.webp
 
 # Profiling
 *.prof
