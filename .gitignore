@@ -11,6 +11,7 @@ compare
 # Test output
 *.webp
 !testdata/*.webp
+!testdata/**/*.webp
 
 # Profiling
 *.prof
@@ -33,3 +34,4 @@ Thumbs.db
 
 libwebp/
 testc/libwebp/
+.tmp/

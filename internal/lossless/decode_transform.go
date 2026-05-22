@@ -370,7 +370,9 @@ func average2(a, b uint32) uint32 {
 }
 
 // selectPredictor implements the VP8L select predictor.
-// Unrolled for all 4 ARGB channels to avoid loop overhead.
+// Per the libwebp reference (Sub3 + Select, Predictor11): for each channel,
+// sums |left - topLeft| - |top - topLeft|; if the sum is <= 0 returns top,
+// otherwise left.
 func selectPredictor(left, top, topLeft uint32) uint32 {
 	ac0 := int32(top&0xff) - int32(topLeft&0xff)
 	bc0 := int32(left&0xff) - int32(topLeft&0xff)
@@ -404,7 +406,8 @@ func selectPredictor(left, top, topLeft uint32) uint32 {
 	if bc3 < 0 {
 		bc3 = -bc3
 	}
-	pa := (ac0 - bc0) + (ac1 - bc1) + (ac2 - bc2) + (ac3 - bc3)
+	// pa_minus_pb = sum of (|left - topLeft| - |top - topLeft|).
+	pa := (bc0 - ac0) + (bc1 - ac1) + (bc2 - ac2) + (bc3 - ac3)
 	if pa <= 0 {
 		return top
 	}

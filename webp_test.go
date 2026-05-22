@@ -183,6 +183,44 @@ func TestDecode_Lossy_Blue16x16(t *testing.T) {
 	}
 }
 
+// TestDecode_Lossless_SelectPredictor is a regression test for the bug where
+// the VP8L Select predictor (mode 11) returned the wrong neighbor, producing
+// catastrophically corrupted pixels. The reference pixel values come from
+// libwebp's dwebp output for the same bitstream. See issue #2.
+func TestDecode_Lossless_SelectPredictor(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "lossless", "bug-decode", "input-vp8l.webp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := Decode(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := img.Bounds()
+	if b.Dx() != 320 || b.Dy() != 320 {
+		t.Fatalf("bounds = %dx%d, want 320x320", b.Dx(), b.Dy())
+	}
+	type px struct{ x, y, r, g, b, a int }
+	want := []px{
+		{0, 0, 178, 176, 173, 255},
+		{1, 1, 176, 174, 171, 255},
+		{50, 50, 166, 164, 162, 255},
+		{160, 160, 5, 3, 3, 255},
+		{319, 319, 180, 170, 157, 255},
+		{0, 319, 163, 165, 162, 255},
+		{319, 0, 146, 146, 146, 255},
+		{200, 100, 0, 0, 0, 255},
+	}
+	for _, p := range want {
+		r, g, bb, a := img.At(p.x, p.y).RGBA()
+		gotR, gotG, gotB, gotA := int(r>>8), int(g>>8), int(bb>>8), int(a>>8)
+		if gotR != p.r || gotG != p.g || gotB != p.b || gotA != p.a {
+			t.Errorf("pixel(%d,%d) = (%d,%d,%d,%d), want (%d,%d,%d,%d)",
+				p.x, p.y, gotR, gotG, gotB, gotA, p.r, p.g, p.b, p.a)
+		}
+	}
+}
+
 // --- image.RegisterFormat integration ---
 
 func TestImageDecodeFormat(t *testing.T) {
