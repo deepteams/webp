@@ -161,15 +161,33 @@ func TestClampedAddSubtractFull_Underflow(t *testing.T) {
 }
 
 func TestSelectPredictor(t *testing.T) {
-	// If top is closer to topLeft than left is, select top.
+	// Matches libwebp Predictor11 (Select(top, left, topLeft)):
+	//   pa_minus_pb = sum(|left-topLeft|) - sum(|top-topLeft|).
+	//   If pa_minus_pb <= 0 -> return top; else -> return left.
+
+	// Case 1: top equals topLeft, left differs.
+	// sum(|left-tl|) = 512, sum(|top-tl|) = 0 -> pa_minus_pb = 512 > 0 -> left.
 	top := uint32(0xff808080)
 	left := uint32(0xff000000)
 	topLeft := uint32(0xff808080)
-	// |top - topLeft| = 0 per component, |left - topLeft| = 128 per component
-	// pa = sum(|top-tl|) - sum(|left-tl|) = 0 - 512 < 0 => select top
-	result := selectPredictor(left, top, topLeft)
-	if result != top {
-		t.Errorf("selectPredictor: got 0x%08x, want 0x%08x (top)", result, top)
+	if got := selectPredictor(left, top, topLeft); got != left {
+		t.Errorf("case1: got 0x%08x, want 0x%08x (left)", got, left)
+	}
+
+	// Case 2: left equals topLeft, top differs -> return top.
+	top = uint32(0xff000000)
+	left = uint32(0xff808080)
+	topLeft = uint32(0xff808080)
+	if got := selectPredictor(left, top, topLeft); got != top {
+		t.Errorf("case2: got 0x%08x, want 0x%08x (top)", got, top)
+	}
+
+	// Case 3: equal distances -> tie returns top (pa_minus_pb == 0).
+	top = uint32(0xff404040)
+	left = uint32(0xffc0c0c0)
+	topLeft = uint32(0xff808080)
+	if got := selectPredictor(left, top, topLeft); got != top {
+		t.Errorf("case3: got 0x%08x, want 0x%08x (top on tie)", got, top)
 	}
 }
 
