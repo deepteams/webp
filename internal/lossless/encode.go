@@ -85,12 +85,12 @@ type Encoder struct {
 	height int
 
 	// ARGB pixel data (may be transformed in place).
-	argb    []uint32
+	argb     []uint32
 	argbOrig []uint32 // original copy for multi-pass
 
 	// Transform state.
-	transforms    []Transform
-	currentWidth  int
+	transforms   []Transform
+	currentWidth int
 
 	// Palette.
 	usePalette  bool
@@ -98,10 +98,10 @@ type Encoder struct {
 	palette     []uint32
 
 	// Transform parameters.
-	predictorBits   int
-	crossColorBits  int
-	histogramBits   int
-	cacheBits       int
+	predictorBits  int
+	crossColorBits int
+	histogramBits  int
+	cacheBits      int
 
 	// Flags.
 	useSubtractGreen bool
@@ -109,20 +109,20 @@ type Encoder struct {
 	useCrossColor    bool
 
 	// Reusable scratch buffers (reduce allocations across encodes).
-	hashChain      *HashChain       // reusable hash chain
-	bestRefs       *BackwardRefs    // reusable backward refs (best)
-	candidateRefs  *BackwardRefs    // reusable backward refs (candidate)
-	traceRefs      *BackwardRefs    // reusable backward refs (trace result)
-	traceDistArray []uint16         // reusable dist array for TraceBackwards
-	huffScratch    *HuffmanScratch  // reusable Huffman tree scratch buffers
+	hashChain      *HashChain          // reusable hash chain
+	bestRefs       *BackwardRefs       // reusable backward refs (best)
+	candidateRefs  *BackwardRefs       // reusable backward refs (candidate)
+	traceRefs      *BackwardRefs       // reusable backward refs (trace result)
+	traceDistArray []uint16            // reusable dist array for TraceBackwards
+	huffScratch    *HuffmanScratch     // reusable Huffman tree scratch buffers
 	brScratch      BackwardRefsScratch // reusable backward refs scratch
 
 	// Minor reusable buffers.
-	sortedPalette  []uint32
-	deltaPalette   []uint32
-	histoImageBuf  []uint32
-	subImageHisto  *Histogram
-	huffCodes      [][HuffmanCodesPerMetaCode]*HuffmanTreeCode
+	sortedPalette []uint32
+	deltaPalette  []uint32
+	histoImageBuf []uint32
+	subImageHisto *Histogram
+	huffCodes     [][HuffmanCodesPerMetaCode]*HuffmanTreeCode
 
 	// Reusable histogram slabs for GetHistoImageSymbols.
 	histoScratch HistoScratch
@@ -154,6 +154,17 @@ const maxHuffImageSize = 2600
 // Encode encodes the ARGB pixel data as a VP8L bitstream and returns the
 // raw encoded bytes (without RIFF/WebP container framing).
 func Encode(argb []uint32, width, height int, config *EncoderConfig) ([]byte, error) {
+	return encode(argb, width, height, config, false)
+}
+
+// EncodeInPlace encodes ARGB pixel data as a VP8L bitstream and may mutate
+// argb while applying lossless transforms. It is intended for callers that own
+// a temporary input buffer and want to avoid the encoder's defensive copy.
+func EncodeInPlace(argb []uint32, width, height int, config *EncoderConfig) ([]byte, error) {
+	return encode(argb, width, height, config, true)
+}
+
+func encode(argb []uint32, width, height int, config *EncoderConfig, inPlace bool) ([]byte, error) {
 	if width <= 0 || height <= 0 || width > 16383 || height > 16383 {
 		return nil, ErrImageTooLarge
 	}
@@ -162,17 +173,30 @@ func Encode(argb []uint32, width, height int, config *EncoderConfig) ([]byte, er
 	}
 
 	enc := acquireEncoder(width, height, config)
-	defer releaseEncoder(enc)
+	defer func() {
+		if inPlace {
+			enc.residualsBuf = nil
+		}
+		releaseEncoder(enc)
+	}()
 
-	// Copy the pixel data since transforms modify it in place.
-	// Reuse the argb buffer if it has sufficient capacity.
 	pixelCount := len(argb)
-	if cap(enc.argb) >= pixelCount {
-		enc.argb = enc.argb[:pixelCount]
+	if inPlace {
+		enc.argb = argb[:pixelCount]
+		// copyImageWithPrediction supports in-place residual output by using
+		// row scratch for original pixels. Reusing the caller-owned ARGB buffer
+		// avoids allocating another image-sized residual buffer.
+		enc.residualsBuf = enc.argb
 	} else {
-		enc.argb = make([]uint32, pixelCount)
+		// Copy the pixel data since transforms modify it in place.
+		// Reuse the argb buffer if it has sufficient capacity.
+		if cap(enc.argb) >= pixelCount {
+			enc.argb = enc.argb[:pixelCount]
+		} else {
+			enc.argb = make([]uint32, pixelCount)
+		}
+		copy(enc.argb, argb)
 	}
-	copy(enc.argb, argb)
 
 	// Analyze image.
 	enc.analyze()
@@ -203,6 +227,19 @@ func Encode(argb []uint32, width, height int, config *EncoderConfig) ([]byte, er
 // the caller to write container framing first.
 func EncodeToWriter(argb []uint32, width, height int, config *EncoderConfig,
 	w io.Writer, writeHeader func(bitstreamSize int) error) error {
+	return encodeToWriter(argb, width, height, config, w, writeHeader, false)
+}
+
+// EncodeToWriterInPlace is like EncodeToWriter, but may mutate argb while
+// applying transforms. It is intended for callers that own a temporary input
+// buffer and want to avoid the encoder's defensive copy.
+func EncodeToWriterInPlace(argb []uint32, width, height int, config *EncoderConfig,
+	w io.Writer, writeHeader func(bitstreamSize int) error) error {
+	return encodeToWriter(argb, width, height, config, w, writeHeader, true)
+}
+
+func encodeToWriter(argb []uint32, width, height int, config *EncoderConfig,
+	w io.Writer, writeHeader func(bitstreamSize int) error, inPlace bool) error {
 	if width <= 0 || height <= 0 || width > 16383 || height > 16383 {
 		return ErrImageTooLarge
 	}
@@ -211,15 +248,25 @@ func EncodeToWriter(argb []uint32, width, height int, config *EncoderConfig,
 	}
 
 	enc := acquireEncoder(width, height, config)
-	defer releaseEncoder(enc)
+	defer func() {
+		if inPlace {
+			enc.residualsBuf = nil
+		}
+		releaseEncoder(enc)
+	}()
 
 	pixelCount := len(argb)
-	if cap(enc.argb) >= pixelCount {
-		enc.argb = enc.argb[:pixelCount]
+	if inPlace {
+		enc.argb = argb[:pixelCount]
+		enc.residualsBuf = enc.argb
 	} else {
-		enc.argb = make([]uint32, pixelCount)
+		if cap(enc.argb) >= pixelCount {
+			enc.argb = enc.argb[:pixelCount]
+		} else {
+			enc.argb = make([]uint32, pixelCount)
+		}
+		copy(enc.argb, argb)
 	}
-	copy(enc.argb, argb)
 
 	enc.analyze()
 	if config.NearLosslessQuality < 100 {
@@ -364,7 +411,9 @@ const maxColorCacheBitsEnc = 10
 // When a palette is in use and its size is small enough, the search range
 // is capped to ceil(log2(paletteSize)) so the cache is never larger than
 // the number of distinct colors. This matches the C reference:
-//   cache_bits_init = (*cache_bits == 0) ? MAX_COLOR_CACHE_BITS : *cache_bits;
+//
+//	cache_bits_init = (*cache_bits == 0) ? MAX_COLOR_CACHE_BITS : *cache_bits;
+//
 // where cache_bits is set from BitsLog2Floor(palette_size)+1 for palette images.
 func cacheBitsForEncoder(quality int, usePalette bool, paletteSize int) int {
 	if quality <= 25 {

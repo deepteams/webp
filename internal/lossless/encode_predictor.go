@@ -290,7 +290,8 @@ func estimateEntropy(argb []uint32, width, height, tx, ty, bits, mode int) float
 //   - width, height: image dimensions
 //   - bits: tile size exponent (tile side = 1 << bits)
 //   - modes: the transform data array with the predictor mode per tile
-//   - out: the output array where residuals are written (same length as argb)
+//   - out: the output array where residuals are written (same length as argb,
+//     and may alias argb)
 func copyImageWithPrediction(argb []uint32, width, height, bits int, modes []uint32, out []uint32) {
 	tilesPerRow := VP8LSubSampleSize(width, bits)
 
@@ -367,10 +368,10 @@ func copyImageWithPrediction(argb []uint32, width, height, bits int, modes []uin
 // bug where residuals overwrite original pixels before they are needed as
 // neighbors for adjacent predictions:
 //
-//   Phase 1: Select the best predictor mode per tile by evaluating entropy
-//            costs on the ORIGINAL (unmodified) pixel data.
-//   Phase 2: Compute all residuals using scratch row buffers that hold copies
-//            of original pixels, matching libwebp's CopyImageWithPrediction.
+//	Phase 1: Select the best predictor mode per tile by evaluating entropy
+//	         costs on the ORIGINAL (unmodified) pixel data.
+//	Phase 2: Compute all residuals using scratch row buffers that hold copies
+//	         of original pixels, matching libwebp's CopyImageWithPrediction.
 func ResidualImage(argb []uint32, width, height, bits, quality int, residualsBuf []uint32) (transformData []uint32, residuals []uint32) {
 	tileXSize := VP8LSubSampleSize(width, bits)
 	tileYSize := VP8LSubSampleSize(height, bits)
@@ -461,7 +462,7 @@ func ResidualImage(argb []uint32, width, height, bits, quality int, residualsBuf
 func SubtractGreen(argb []uint32) {
 	for i, px := range argb {
 		green := (px >> 8) & 0xff
-		red := ((px >> 16) & 0xff - green) & 0xff
+		red := ((px>>16)&0xff - green) & 0xff
 		blue := (px&0xff - green) & 0xff
 		argb[i] = (px & 0xff00ff00) | (red << 16) | blue
 	}

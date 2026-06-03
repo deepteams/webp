@@ -501,7 +501,7 @@ func encodeAlphaInternal(data []byte, width, height, method, filter int,
 			Method:              effortLevel,
 			NearLosslessQuality: 100,
 		}
-		compressed, err := lossless.Encode(argb, width, height, lcfg)
+		compressed, err := lossless.EncodeInPlace(argb, width, height, lcfg)
 		if err != nil {
 			return nil, 0, fmt.Errorf("alpha: VP8L encode failed: %w", err)
 		}

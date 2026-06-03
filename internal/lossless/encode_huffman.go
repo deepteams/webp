@@ -842,6 +842,7 @@ func storeFullHuffmanCodeScratch(bw *bitio.LosslessWriter, tree *HuffmanTreeCode
 	var tokens []HuffmanTreeToken
 	if scratch != nil {
 		tokens = BuildCodeLengthTokensScratch(tree.CodeLengths, scratch.tokens)
+		scratch.tokens = tokens
 	} else {
 		tokens = BuildCodeLengthTokens(tree.CodeLengths)
 	}

@@ -675,7 +675,7 @@ func encodeLossless(img image.Image, opts *EncoderOptions) ([]byte, uint32, erro
 		Method:              opts.Method,
 		NearLosslessQuality: 100,
 	}
-	bs, err := lossless.Encode(argb, width, height, lcfg)
+	bs, err := lossless.EncodeInPlace(argb, width, height, lcfg)
 	argbPool.Put(ab)
 	if err != nil {
 		return nil, 0, fmt.Errorf("webp: lossless encode: %w", err)
@@ -743,7 +743,7 @@ func encodeLosslessToWriter(w io.Writer, img image.Image, opts *EncoderOptions) 
 	}
 
 	fourcc := container.FourCCVP8L
-	err := lossless.EncodeToWriter(argb, width, height, lcfg, w,
+	err := lossless.EncodeToWriterInPlace(argb, width, height, lcfg, w,
 		func(bitstreamSize int) error {
 			// Note: argbPool.Put(ab) moved after EncodeToWriter returns
 			// to avoid use-after-pool-put (V7 security fix).
