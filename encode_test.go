@@ -2,12 +2,15 @@ package webp
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"image"
 	"image/color"
 	"math"
 	"strings"
 	"testing"
+
+	"github.com/deepteams/webp/internal/lossless"
 )
 
 // --- Options / Defaults tests ---
@@ -110,6 +113,48 @@ func gradientTestImage(w, h int) *image.NRGBA {
 		}
 	}
 	return img
+}
+
+func findRIFFChunk(data []byte, fourcc string) ([]byte, bool) {
+	if len(data) < 12 {
+		return nil, false
+	}
+	for off := 12; off+8 <= len(data); {
+		id := string(data[off : off+4])
+		size := int(binary.LittleEndian.Uint32(data[off+4 : off+8]))
+		payloadOff := off + 8
+		if size < 0 || payloadOff+size > len(data) {
+			return nil, false
+		}
+		if id == fourcc {
+			return data[payloadOff : payloadOff+size], true
+		}
+		off = payloadOff + size
+		if size&1 != 0 {
+			off++
+		}
+	}
+	return nil, false
+}
+
+func vp8LStreamForAlphaPayload(payload []byte, width, height int) []byte {
+	stream := make([]byte, lossless.VP8LHeaderSize+len(payload))
+	stream[0] = lossless.VP8LMagicByte
+	bits := uint32(width-1) | uint32(height-1)<<lossless.VP8LImageSizeBits
+	binary.LittleEndian.PutUint32(stream[1:5], bits)
+	copy(stream[lossless.VP8LHeaderSize:], payload)
+	return stream
+}
+
+func startsWithVP8LHeaderForSize(payload []byte, width, height int) bool {
+	if len(payload) < lossless.VP8LHeaderSize || payload[0] != lossless.VP8LMagicByte {
+		return false
+	}
+	bits := binary.LittleEndian.Uint32(payload[1:5])
+	w := int(bits&((1<<lossless.VP8LImageSizeBits)-1)) + 1
+	h := int((bits>>lossless.VP8LImageSizeBits)&((1<<lossless.VP8LImageSizeBits)-1)) + 1
+	version := bits >> (2*lossless.VP8LImageSizeBits + 1)
+	return w == width && h == height && version == lossless.VP8LVersion
 }
 
 func TestEncodeLossless_ValidOutput(t *testing.T) {
@@ -407,6 +452,51 @@ func TestEncodeLossy_WithAlpha_Roundtrip(t *testing.T) {
 				}
 				return "outside tolerance"
 			}())
+	}
+}
+
+func TestEncodeLossy_ALPHCompressedPayloadOmitsVP8LHeader(t *testing.T) {
+	const width, height = 64, 64
+	img := image.NewNRGBA(image.Rect(0, 0, width, height))
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{
+				R: 180,
+				G: 90,
+				B: 40,
+				A: byte((x*3 + y*5) & 0xff),
+			})
+		}
+	}
+
+	var buf bytes.Buffer
+	if err := Encode(&buf, img, &EncoderOptions{
+		Quality:          80,
+		Method:           4,
+		AlphaCompression: 1,
+		AlphaFiltering:   0,
+		AlphaQuality:     100,
+	}); err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+
+	alph, ok := findRIFFChunk(buf.Bytes(), "ALPH")
+	if !ok {
+		t.Fatal("missing ALPH chunk")
+	}
+	if len(alph) < 2 {
+		t.Fatalf("ALPH chunk too small: %d bytes", len(alph))
+	}
+	if got := alph[0] & 0x03; got != 1 {
+		t.Fatalf("alpha compression = %d, want VP8L compression", got)
+	}
+
+	payload := alph[1:]
+	if startsWithVP8LHeaderForSize(payload, width, height) {
+		t.Fatal("compressed ALPH payload contains a VP8L image header")
+	}
+	if _, err := lossless.DecodeVP8L(vp8LStreamForAlphaPayload(payload, width, height)); err != nil {
+		t.Fatalf("ALPH payload is not a valid headerless VP8L stream: %v", err)
 	}
 }
 

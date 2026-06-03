@@ -1,6 +1,7 @@
 package lossy
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math"
 
@@ -74,9 +75,10 @@ func DecodeAlpha(data []byte, width, height int) ([]byte, error) {
 
 	case AlphaLosslessCompression:
 		// VP8L-compressed alpha: decode using the lossless decoder.
-		// The alpha data is encoded as a VP8L bitstream where the
-		// green channel contains the alpha values.
-		alphaImage, err := lossless.DecodeVP8L(payload)
+		// ALPH stores a VP8L image stream without the 5-byte VP8L header;
+		// dimensions come from the enclosing canvas. Rebuild the header here
+		// before feeding it to the standalone VP8L decoder.
+		alphaImage, err := lossless.DecodeVP8L(alphaVP8LStream(payload, width, height))
 		if err != nil {
 			return nil, fmt.Errorf("alpha: VP8L decode failed: %w", err)
 		}
@@ -495,21 +497,25 @@ func encodeAlphaInternal(data []byte, width, height, method, filter int,
 		}
 
 		lcfg := &lossless.EncoderConfig{
-			Quality: q,
-			Method:  effortLevel,
+			Quality:             q,
+			Method:              effortLevel,
 			NearLosslessQuality: 100,
 		}
 		compressed, err := lossless.Encode(argb, width, height, lcfg)
 		if err != nil {
 			return nil, 0, fmt.Errorf("alpha: VP8L encode failed: %w", err)
 		}
+		if len(compressed) < lossless.VP8LHeaderSize {
+			return nil, 0, fmt.Errorf("alpha: VP8L encode produced truncated stream")
+		}
+		payload := compressed[lossless.VP8LHeaderSize:]
 
-		if len(compressed) > dataSize {
+		if len(payload) > dataSize {
 			// Compressed is larger than raw — fall back to uncompressed.
 			method = AlphaNoCompression
 			output = alphaSrc
 		} else {
-			output = compressed
+			output = payload
 		}
 	}
 
@@ -528,6 +534,15 @@ func encodeAlphaInternal(data []byte, width, height, method, filter int,
 	copy(result[1:], output)
 
 	return result, len(result), nil
+}
+
+func alphaVP8LStream(payload []byte, width, height int) []byte {
+	stream := make([]byte, lossless.VP8LHeaderSize+len(payload))
+	stream[0] = lossless.VP8LMagicByte
+	bits := uint32(width-1) | uint32(height-1)<<lossless.VP8LImageSizeBits
+	binary.LittleEndian.PutUint32(stream[1:5], bits)
+	copy(stream[lossless.VP8LHeaderSize:], payload)
+	return stream
 }
 
 // applyFiltersAndEncode tries the filter(s) selected by getFilterMap and
