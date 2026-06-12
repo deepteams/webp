@@ -2241,3 +2241,87 @@ func TestEncode_MalformedNRGBA_FallsToGenericPath(t *testing.T) {
 		t.Fatalf("decoded size = %dx%d, want 4x4", decoded.Bounds().Dx(), decoded.Bounds().Dy())
 	}
 }
+
+// TestEncodeLossless_HighEntropyRoundtrip is a regression test for issue #7
+// (https://github.com/deepteams/webp/issues/7): lossless VP8L encoding of
+// photographic / high-entropy images produced visible block corruption.
+//
+// Root cause: the encoder's Select predictor (mode 11, selectPred in
+// internal/lossless/encode_predictor.go) summed (|top-topLeft| - |left-topLeft|),
+// the negation of the spec / decoder formula (|left-topLeft| - |top-topLeft|).
+// When the per-tile predictor search chose mode 11, the encoder predicted the
+// opposite neighbor from what the decoder reconstructs, so the residuals were
+// uninvertible and whole tiles decoded to garbage (magenta/cyan/green blocks).
+//
+// Lossless must be bit-exact, so this test round-trips noisy images that
+// reliably exercise the Select predictor across several sizes and methods and
+// asserts every pixel survives unchanged.
+func TestEncodeLossless_HighEntropyRoundtrip(t *testing.T) {
+	// Per-channel independent pseudo-noise on top of a smooth gradient: the
+	// gradient makes spatial predictors (including Select) attractive per tile,
+	// while the noise keeps entropy high. Deterministic LCG (no math/rand
+	// dependency) so the corpus is stable across Go versions.
+	makeImg := func(w, h int) *image.NRGBA {
+		img := image.NewNRGBA(image.Rect(0, 0, w, h))
+		var s uint32 = 0x12345678
+		next := func() uint32 { s = s*1664525 + 1013904223; return s }
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				img.SetNRGBA(x, y, color.NRGBA{
+					R: uint8((x*7 + y*3 + int(next()>>24)) & 0xff),
+					G: uint8((x*3 + y*5 + int(next()>>24)) & 0xff),
+					B: uint8((x*11 + y*2 + int(next()>>24)) & 0xff),
+					A: 255,
+				})
+			}
+		}
+		return img
+	}
+
+	sizes := []struct{ w, h int }{{48, 48}, {64, 64}, {127, 65}, {200, 150}}
+	methods := []int{0, 2, 4, 6}
+
+	for _, sz := range sizes {
+		img := makeImg(sz.w, sz.h)
+		for _, method := range methods {
+			t.Run(fmt.Sprintf("%dx%d_m%d", sz.w, sz.h, method), func(t *testing.T) {
+				var buf bytes.Buffer
+				if err := Encode(&buf, img, &EncoderOptions{
+					Lossless: true,
+					Quality:  75,
+					Method:   method,
+				}); err != nil {
+					t.Fatalf("Encode: %v", err)
+				}
+
+				decoded, err := Decode(bytes.NewReader(buf.Bytes()))
+				if err != nil {
+					t.Fatalf("Decode: %v", err)
+				}
+				b := decoded.Bounds()
+				if b.Dx() != sz.w || b.Dy() != sz.h {
+					t.Fatalf("decoded size = %dx%d, want %dx%d", b.Dx(), b.Dy(), sz.w, sz.h)
+				}
+
+				diff := 0
+				var fx, fy int = -1, -1
+				for y := 0; y < sz.h; y++ {
+					for x := 0; x < sz.w; x++ {
+						or, og, ob, oa := img.At(x, y).RGBA()
+						dr, dg, db, da := decoded.At(x, y).RGBA()
+						if or != dr || og != dg || ob != db || oa != da {
+							if diff == 0 {
+								fx, fy = x, y
+							}
+							diff++
+						}
+					}
+				}
+				if diff != 0 {
+					t.Fatalf("lossless round-trip not bit-exact: %d/%d pixels differ (first at %d,%d)",
+						diff, sz.w*sz.h, fx, fy)
+				}
+			})
+		}
+	}
+}
