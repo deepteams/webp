@@ -969,28 +969,28 @@ func writeRIFFSimple(w io.Writer, fourcc uint32, bitstream []byte) error {
 	// RIFF file size = 4 ("WEBP") + 8 (chunk header) + paddedPayload
 	riffSize := 4 + container.ChunkHeaderSize + paddedPayload
 
-	// Total file: 8 (RIFF + size) + riffSize
-	buf := make([]byte, 8+riffSize)
-
 	// RIFF header.
-	binary.LittleEndian.PutUint32(buf[0:4], container.FourCCRIFF)
-	binary.LittleEndian.PutUint32(buf[4:8], riffSize)
-	binary.LittleEndian.PutUint32(buf[8:12], container.FourCCWEBP)
+	var hdr [20]byte
+	binary.LittleEndian.PutUint32(hdr[0:4], container.FourCCRIFF)
+	binary.LittleEndian.PutUint32(hdr[4:8], riffSize)
+	binary.LittleEndian.PutUint32(hdr[8:12], container.FourCCWEBP)
 
 	// Chunk header.
-	binary.LittleEndian.PutUint32(buf[12:16], fourcc)
-	binary.LittleEndian.PutUint32(buf[16:20], payloadSize)
+	binary.LittleEndian.PutUint32(hdr[12:16], fourcc)
+	binary.LittleEndian.PutUint32(hdr[16:20], payloadSize)
 
-	// Chunk payload.
-	copy(buf[20:], bitstream)
-
-	// Padding byte if odd.
-	if payloadSize&1 != 0 {
-		buf[20+payloadSize] = 0
+	if _, err := w.Write(hdr[:]); err != nil {
+		return err
 	}
-
-	_, err := w.Write(buf)
-	return err
+	if _, err := w.Write(bitstream); err != nil {
+		return err
+	}
+	if payloadSize&1 != 0 {
+		var pad [1]byte
+		_, err := w.Write(pad[:])
+		return err
+	}
+	return nil
 }
 
 // writeRIFFExtended writes the VP8X extended RIFF/WEBP container.
