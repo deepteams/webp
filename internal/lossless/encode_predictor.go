@@ -83,7 +83,11 @@ func selectPred(left, top, topLeft uint32) uint32 {
 	if bc3 < 0 {
 		bc3 = -bc3
 	}
-	pa := (ac0 - bc0) + (ac1 - bc1) + (ac2 - bc2) + (ac3 - bc3)
+	// pa_minus_pb = sum of (|left - topLeft| - |top - topLeft|), matching the
+	// decoder's selectPredictor and libwebp's Select. The previous code summed
+	// (ac - bc), i.e. the negation, which inverted the top/left decision and
+	// produced residuals the decoder could not reconstruct (issue #7).
+	pa := (bc0 - ac0) + (bc1 - ac1) + (bc2 - ac2) + (bc3 - ac3)
 	if pa <= 0 {
 		return top
 	}
