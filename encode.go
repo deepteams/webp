@@ -418,6 +418,9 @@ func resolveAlphaQuality(v int) int {
 // Encode writes the image img to w in WebP format.
 // If opts is nil, DefaultOptions() is used.
 // Returns an error if opts contains invalid parameter values.
+//
+// Encode is safe for concurrent use and deterministic: the output bytes
+// depend only on img and opts.
 func Encode(w io.Writer, img image.Image, opts *EncoderOptions) error {
 	if w == nil {
 		return fmt.Errorf("webp: nil writer")

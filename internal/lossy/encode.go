@@ -18,7 +18,6 @@ type importUVWorker struct {
 	tmpRGB                 []uint16
 }
 
-
 var importUVWorkerPool sync.Pool
 
 func getImportUVWorker(padW, uvWidth int) *importUVWorker {
@@ -45,22 +44,22 @@ func getImportUVWorker(padW, uvWidth int) *importUVWorker {
 
 // EncodeConfig holds VP8 encoding parameters.
 type EncodeConfig struct {
-	Quality    int  // 0-100, maps to quantizer.
-	TargetSize int  // Target byte size (0 = use quality).
-	TargetPSNR float32 // Target PSNR (0 = disabled). Matches C libwebp's target_PSNR.
-	Method     int  // 0-6, compression effort.
-	SNSStrength int // 0-100, spatial noise shaping.
-	FilterStrength int // 0-100, deblocking filter.
-	FilterSharpness int // 0-7, filter sharpness.
-	FilterType int  // 0=simple, 1=strong loop-filter.
-	Partitions int  // 0-3 => 1, 2, 4, 8 partitions.
-	Segments   int  // 1-4, number of segments.
-	Pass       int  // 1-10, multi-pass encoding.
-	Preprocessing int  // Bitmask: bit 0 = segment smooth, bit 1 = dithering.
-	Dithering  float32 // Dithering amplitude [0..1] for RGB->YUV conversion.
-	QMin       int  // 0-100, minimum quantizer value. Matches C libwebp's qmin.
-	QMax       int  // 0-100, maximum quantizer value. Matches C libwebp's qmax. -1 = use default (100).
-	HasAlpha   int  // -1 = unknown (will scan), 0 = no alpha, 1 = has alpha. Avoids redundant imageHasAlpha scans.
+	Quality         int     // 0-100, maps to quantizer.
+	TargetSize      int     // Target byte size (0 = use quality).
+	TargetPSNR      float32 // Target PSNR (0 = disabled). Matches C libwebp's target_PSNR.
+	Method          int     // 0-6, compression effort.
+	SNSStrength     int     // 0-100, spatial noise shaping.
+	FilterStrength  int     // 0-100, deblocking filter.
+	FilterSharpness int     // 0-7, filter sharpness.
+	FilterType      int     // 0=simple, 1=strong loop-filter.
+	Partitions      int     // 0-3 => 1, 2, 4, 8 partitions.
+	Segments        int     // 1-4, number of segments.
+	Pass            int     // 1-10, multi-pass encoding.
+	Preprocessing   int     // Bitmask: bit 0 = segment smooth, bit 1 = dithering.
+	Dithering       float32 // Dithering amplitude [0..1] for RGB->YUV conversion.
+	QMin            int     // 0-100, minimum quantizer value. Matches C libwebp's qmin.
+	QMax            int     // 0-100, maximum quantizer value. Matches C libwebp's qmax. -1 = use default (100).
+	HasAlpha        int     // -1 = unknown (will scan), 0 = no alpha, 1 = has alpha. Avoids redundant imageHasAlpha scans.
 }
 
 // DefaultConfig returns sensible encoding defaults (quality 75, method 4).
@@ -103,20 +102,20 @@ type VP8Encoder struct {
 	savedY, savedU, savedV []byte
 
 	// Reconstruction buffers (BPS-strided, for prediction/comparison).
-	yuvIn  []byte // original (source) macroblock, BPS-strided
-	yuvOut []byte // best reconstructed output, BPS-strided
+	yuvIn   []byte // original (source) macroblock, BPS-strided
+	yuvOut  []byte // best reconstructed output, BPS-strided
 	yuvOut2 []byte // secondary reconstruction buffer, BPS-strided
-	yuvP   []byte // prediction buffer, BPS-strided (33*BPS for top+left context)
+	yuvP    []byte // prediction buffer, BPS-strided (33*BPS for top+left context)
 
 	// Per-macroblock info.
 	mbInfo []MBEncInfo
 
 	// Segment info.
-	dqm  [NumMBSegments]SegmentInfo
+	dqm        [NumMBSegments]SegmentInfo
 	segmentHdr SegmentHeader
 
 	// Probabilities.
-	proba  Proba
+	proba Proba
 
 	// Token buffers (partition 0 = modes, partition 1+ = coefficients).
 	tokens TokenBuffer
@@ -135,10 +134,10 @@ type VP8Encoder struct {
 	numParts int
 
 	// NZ context tracking for token encoding (mirrors decoder's parseResiduals).
-	topNz   []uint32 // per-column top NZ bits
-	leftNz  uint32   // left NZ bits for current row
-	topNzDC []uint8  // per-column top DC NZ (for I16 mode)
-	leftNzDC uint8   // left DC NZ for current row
+	topNz    []uint32 // per-column top NZ bits
+	leftNz   uint32   // left NZ bits for current row
+	topNzDC  []uint8  // per-column top DC NZ (for I16 mode)
+	leftNzDC uint8    // left DC NZ for current row
 
 	// Quantization deltas (applied to base q for each channel).
 	// Y1 DC delta (always 0 in C libwebp; included for structural parity).
@@ -233,23 +232,23 @@ type VP8Encoder struct {
 
 	// Pre-allocated serial UV conversion buffers (dithered/non-NRGBA path).
 	// Reused via the encoder pool when dimensions match.
-	serialRowR, serialRowG, serialRowB, serialRowA [2][]uint8
+	serialRowR, serialRowG, serialRowB, serialRowA             [2][]uint8
 	serialPlanarR, serialPlanarG, serialPlanarB, serialPlanarA []uint8
-	serialTmpRGB []uint16
+	serialTmpRGB                                               []uint16
 }
 
 // MBEncInfo stores per-macroblock encoding decisions.
 type MBEncInfo struct {
-	MBType   int // 0=i16, 1=i4
-	UVMode   uint8
-	Segment  uint8
-	Alpha    int // complexity alpha from analysis (0-255), used for segment assignment
-	Skip     bool
+	MBType  int // 0=i16, 1=i4
+	UVMode  uint8
+	Segment uint8
+	Alpha   int // complexity alpha from analysis (0-255), used for segment assignment
+	Skip    bool
 	// Intra prediction modes.
-	I16Mode  uint8
-	Modes    [16]uint8 // 4x4 modes when MBType==1
+	I16Mode uint8
+	Modes   [16]uint8 // 4x4 modes when MBType==1
 	// Quantized coefficients: 16 Y blocks (0-255) + 4 U (256-319) + 4 V (320-383) + 1 WHT DC (384-399).
-	Coeffs   [400]int16
+	Coeffs [400]int16
 	// Non-zero flags.
 	NonZeroY  uint32
 	NonZeroUV uint32
@@ -278,9 +277,9 @@ type MBEncInfo struct {
 // SegmentInfo holds quantization parameters for one segment.
 type SegmentInfo struct {
 	// Quant matrices for this segment.
-	Y1  SegmentQuant // luma
-	Y2  SegmentQuant // luma DC (secondary transform)
-	UV  SegmentQuant // chroma
+	Y1 SegmentQuant // luma
+	Y2 SegmentQuant // luma DC (secondary transform)
+	UV SegmentQuant // chroma
 	// Lambda for RD scoring (mode selection).
 	Lambda     int // general lambda (for backward compat)
 	LambdaI4   int // I4x4 mode selection lambda
@@ -296,14 +295,14 @@ type SegmentInfo struct {
 	Lambda2    int // squared lambda
 	MinDisto   int // minimum distortion
 	// Global quantizer value.
-	Quant      int
-	FStrength  int // filter strength for this segment
+	Quant     int
+	FStrength int // filter strength for this segment
 	// I4 vs I16 penalty.
-	I4Penalty  int // cost penalty for choosing I4 over I16 mode
+	I4Penalty int // cost penalty for choosing I4 over I16 mode
 	// For SNS.
-	Alpha      int // segment susceptibility [-127..127], from SetSegmentAlphas
-	Beta       int
-	MaxEdge    int
+	Alpha   int // segment susceptibility [-127..127], from SetSegmentAlphas
+	Beta    int
+	MaxEdge int
 }
 
 // SegmentQuant holds quantizer/dequantizer values and bias for one component.
@@ -311,21 +310,21 @@ type SegmentInfo struct {
 // Quantization uses QFIX=17 fixed-point: level = (coeff * IQuant + Bias) >> 17.
 type SegmentQuant struct {
 	// AC quantizer (coefficients 1-15).
-	Quant    int    // AC quantizer multiplier (dequantization factor)
-	IQuant   int    // AC inverse quantizer multiplier (Q17 fixed-point)
-	Bias     int    // AC rounding bias for QUANTDIV
-	Zthresh  int    // AC zero threshold
+	Quant   int // AC quantizer multiplier (dequantization factor)
+	IQuant  int // AC inverse quantizer multiplier (Q17 fixed-point)
+	Bias    int // AC rounding bias for QUANTDIV
+	Zthresh int // AC zero threshold
 	// DC quantizer (coefficient 0).
-	DCQuant  int    // DC quantizer multiplier (dequantization factor)
-	DCIQuant int    // DC inverse quantizer multiplier (Q17 fixed-point)
-	DCBias   int    // DC rounding bias for QUANTDIV
-	DCZthresh int   // DC zero threshold
-	Sharpen  [16]int16 // sharpening values added to coefficients before quantization
+	DCQuant   int       // DC quantizer multiplier (dequantization factor)
+	DCIQuant  int       // DC inverse quantizer multiplier (Q17 fixed-point)
+	DCBias    int       // DC rounding bias for QUANTDIV
+	DCZthresh int       // DC zero threshold
+	Sharpen   [16]int16 // sharpening values added to coefficients before quantization
 }
 
 // EncStats collects encoding statistics for multi-pass optimization.
 type EncStats struct {
-	PSNR      [5]float64 // per-channel + global
+	PSNR       [5]float64 // per-channel + global
 	CodedSize  int
 	HeaderSize int
 	Residuals  int
@@ -386,6 +385,9 @@ func ReleaseEncoder(enc *VP8Encoder) {
 
 // resetForReuse clears mutable state so a pooled encoder can be reused.
 // The caller must have verified that mbW and mbH match.
+//
+// Any field read by the encode path before being fully rewritten leaks
+// prior-encode bytes into the bitstream under pool reuse.
 func (enc *VP8Encoder) resetForReuse(cfg EncodeConfig, width, height int) {
 	enc.config = cfg
 	enc.width = width
@@ -426,6 +428,12 @@ func (enc *VP8Encoder) resetForReuse(cfg EncodeConfig, width, height int) {
 	enc.savedU = nil
 	enc.savedV = nil
 	enc.tmpBestNz = 0
+
+	// MBEncInfo has read-before-write paths (e.g. NzDC is only set on the
+	// I16 residual branch); reset the whole slab to avoid tracking each one.
+	for i := range enc.mbInfo {
+		enc.mbInfo[i] = MBEncInfo{}
+	}
 
 	// Clear topDerr (already allocated).
 	for i := range enc.topDerr {
@@ -1423,13 +1431,13 @@ func (enc *VP8Encoder) statLoop() {
 // Supports convergence on either target size or target PSNR,
 // controlled by the doSizeSearch flag.
 type passStats struct {
-	isFirst                bool
-	dq                     float64
-	q, lastQ               float64
-	qmin, qmax             float64
-	value, lastValue       float64 // PSNR or size (depending on doSizeSearch)
-	target                 float64 // target size or PSNR
-	doSizeSearch           bool    // true=converge on size, false=converge on PSNR
+	isFirst          bool
+	dq               float64
+	q, lastQ         float64
+	qmin, qmax       float64
+	value, lastValue float64 // PSNR or size (depending on doSizeSearch)
+	target           float64 // target size or PSNR
+	doSizeSearch     bool    // true=converge on size, false=converge on PSNR
 }
 
 // initPassStats initializes rate control state, matching C libwebp's
