@@ -1125,8 +1125,11 @@ func setupSegment(enc *VP8Encoder, idx, q int) {
 	// Texture distortion lambda (for perceptual SD term in mode selection).
 	// In libwebp: tlambda = (tlambda_scale * q_i4) >> 5
 	// tlambda_scale = sns_strength (0-100) for method >= 4, else 0.
+	// Assign in both branches: dqm is pool-reused.
 	if enc.config.Method >= 4 && enc.config.SNSStrength > 0 {
 		seg.TLambdaSD = (enc.config.SNSStrength * qI4) >> 5
+	} else {
+		seg.TLambdaSD = 0
 	}
 
 	// MinDisto: quantization-aware minimum distortion threshold (matching libwebp).

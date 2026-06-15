@@ -72,6 +72,68 @@ func TestConcurrentEncodeDeterminism(t *testing.T) {
 	}
 }
 
+// noisyImage builds an image with enough high-frequency content to make the
+// SNS texture-distortion term tip mode decisions. A smooth gradient is too
+// uniform to surface the leak.
+func noisyImage(w, h int) *image.RGBA {
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			img.Set(x, y, color.RGBA{
+				R: uint8((x*7 + y*3) & 0xFF),
+				G: uint8((x*5 ^ y*11) & 0xFF),
+				B: uint8((x ^ (y << 2)) & 0xFF),
+				A: 255,
+			})
+		}
+	}
+	return img
+}
+
+// TestEncodePoolStateAcrossOpts verifies that the encoder pool does not leak
+// dqm SegmentInfo state across encodes at the same dimensions with different
+// opts. setupSegment's TLambdaSD write is gated on Method>=4 && SNSStrength>0;
+// without an else branch zeroing it, an encode with SNSStrength=0 after one
+// with SNSStrength=50 inherits the prior value via pool reuse.
+func TestEncodePoolStateAcrossOpts(t *testing.T) {
+	img := noisyImage(256, 256)
+	optsOff := &webp.EncoderOptions{Quality: 80, Method: 4, SNSStrength: 0}
+	optsOn := &webp.EncoderOptions{Quality: 80, Method: 4, SNSStrength: 50}
+
+	// Warm the pool so the baseline measures the steady-state pooled encode.
+	for i := 0; i < 3; i++ {
+		var b bytes.Buffer
+		if err := webp.Encode(&b, img, optsOff); err != nil {
+			t.Fatalf("warm-up encode: %v", err)
+		}
+	}
+
+	var baseline bytes.Buffer
+	if err := webp.Encode(&baseline, img, optsOff); err != nil {
+		t.Fatalf("baseline encode: %v", err)
+	}
+
+	// Prime the pool with opts that set TLambdaSD > 0.
+	for i := 0; i < 3; i++ {
+		var b bytes.Buffer
+		if err := webp.Encode(&b, img, optsOn); err != nil {
+			t.Fatalf("primer encode: %v", err)
+		}
+	}
+
+	// Encode optsOff again. With the fix, every byte matches baseline;
+	// without it, a positive TLambdaSD from the primer survives.
+	for i := 0; i < 5; i++ {
+		var b bytes.Buffer
+		if err := webp.Encode(&b, img, optsOff); err != nil {
+			t.Fatalf("post-primer encode #%d: %v", i, err)
+		}
+		if !bytes.Equal(b.Bytes(), baseline.Bytes()) {
+			t.Fatalf("encode #%d: dqm state leaked from prior SNSStrength=50 encode (baseline=%d bytes, got=%d bytes)", i, baseline.Len(), b.Len())
+		}
+	}
+}
+
 func TestConcurrentEncodeRace(t *testing.T) {
 	img := gradient(256, 256, 0)
 
