@@ -435,6 +435,13 @@ func (enc *VP8Encoder) resetForReuse(cfg EncodeConfig, width, height int) {
 		enc.mbInfo[i] = MBEncInfo{}
 	}
 
+	// dqm SegmentInfo has the same class of read-before-write leak under pool
+	// reuse (e.g. TLambdaSD is only set on the SNS path). Reset every segment
+	// rather than tracking individual conditionally-written fields.
+	for i := range enc.dqm {
+		enc.dqm[i] = SegmentInfo{}
+	}
+
 	// Clear topDerr (already allocated).
 	for i := range enc.topDerr {
 		enc.topDerr[i] = [2][2]int8{}
