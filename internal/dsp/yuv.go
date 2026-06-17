@@ -1,6 +1,9 @@
 package dsp
 
-import "math"
+import (
+	"math"
+	"sync"
+)
 
 // BT.601 YUV <-> RGB conversion using fixed-point arithmetic.
 // All coefficients match libwebp yuv.h exactly.
@@ -182,36 +185,33 @@ const (
 var (
 	kLinearToGammaTab [kGammaTabSize + 2]uint32 // [0..GAMMA_TAB_SIZE+1] = [0..33]
 	kGammaToLinearTab [256]uint32
-	gammaTablesInited bool
+	gammaTablesOnce   sync.Once
 )
 
 // InitGammaTables initializes the gamma correction lookup tables.
-// Safe to call multiple times; only initializes once.
+// Safe to call concurrently from multiple goroutines; tables are initialized exactly once.
 func InitGammaTables() {
-	if gammaTablesInited {
-		return
-	}
-	gammaTablesInited = true
+	gammaTablesOnce.Do(func() {
+		// kGammaToLinearTab: maps gamma-space [0..255] to linear fixed-point.
+		// C reference (yuv.c:243-244): pow(norm * v, kGamma) * kGammaScale
+		// where kGamma = 0.80, norm = 1/255.
+		for i := 0; i < 256; i++ {
+			v := float64(i) / 255.0
+			lin := gammaPow(v, kGamma) * float64(kGammaScale)
+			kGammaToLinearTab[i] = uint32(lin + 0.5)
+		}
 
-	// kGammaToLinearTab: maps gamma-space [0..255] to linear fixed-point.
-	// C reference (yuv.c:243-244): pow(norm * v, kGamma) * kGammaScale
-	// where kGamma = 0.80, norm = 1/255.
-	for i := 0; i < 256; i++ {
-		v := float64(i) / 255.0
-		lin := gammaPow(v, kGamma) * float64(kGammaScale)
-		kGammaToLinearTab[i] = uint32(lin + 0.5)
-	}
-
-	// kLinearToGammaTab: maps linear fixed-point [0..kGammaTabSize] to gamma [0..255].
-	// C reference (yuv.c:246-247): 255 * pow(scale * v, 1/kGamma)
-	// where scale = kGammaTabScale / kGammaScale.
-	scale := float64(kGammaTabScale) / float64(kGammaScale)
-	for i := 0; i <= kGammaTabSize; i++ {
-		v := scale * float64(i)
-		g := gammaPow(v, 1.0/kGamma) * 255.0
-		kLinearToGammaTab[i] = uint32(g + 0.5)
-	}
-	kLinearToGammaTab[kGammaTabSize+1] = 255
+		// kLinearToGammaTab: maps linear fixed-point [0..kGammaTabSize] to gamma [0..255].
+		// C reference (yuv.c:246-247): 255 * pow(scale * v, 1/kGamma)
+		// where scale = kGammaTabScale / kGammaScale.
+		scale := float64(kGammaTabScale) / float64(kGammaScale)
+		for i := 0; i <= kGammaTabSize; i++ {
+			v := scale * float64(i)
+			g := gammaPow(v, 1.0/kGamma) * 255.0
+			kLinearToGammaTab[i] = uint32(g + 0.5)
+		}
+		kLinearToGammaTab[kGammaTabSize+1] = 255
+	})
 }
 
 // gammaPow computes base^exp for gamma correction.
