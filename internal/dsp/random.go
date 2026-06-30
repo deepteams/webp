@@ -52,12 +52,9 @@ func InitRandom(rg *VP8Random, dithering float32) {
 // RandomBits2 returns a centered pseudo-random number with numBits amplitude,
 // scaled by the given amp. Matches C VP8RandomBits2.
 func RandomBits2(rg *VP8Random, numBits, amp int) int {
-	// Use uint32 arithmetic so that the constant 1<<31 (2147483648) never
-	// overflows int on 32-bit targets (GOARCH=386, arm).
-	tab := rg.tab[rg.index1] - rg.tab[rg.index2]
-	if int32(tab) < 0 {
-		tab += 1 << 31
-	}
+	// Mask to 31 bits: equivalent to the signed "if diff<0 { diff+=1<<31 }" in
+	// the C reference, but avoids overflow on 32-bit targets (GOARCH=386, arm).
+	tab := (rg.tab[rg.index1] - rg.tab[rg.index2]) & 0x7fffffff
 	rg.tab[rg.index1] = tab
 	rg.index1++
 	if rg.index1 == vp8RandomTableSize {

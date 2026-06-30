@@ -130,3 +130,29 @@ func TestVP8RandomBitsWraparound(t *testing.T) {
 	}
 	// If we got here without panicking, indices wrapped correctly.
 }
+
+func TestVP8RandomTableStays31Bit(t *testing.T) {
+	// tab[0]=0x0de15230 < tab[31]=0x26d7cb1c in the initial table, so the
+	// very first call exercises the negative-diff path (the overflow fix).
+	// After the update tab[0] must still be a 31-bit value (bit 31 clear).
+	var rg VP8Random
+	InitRandom(&rg, 1.0)
+	RandomBits(&rg, 16)
+	if rg.tab[0]&(1<<31) != 0 {
+		t.Errorf("tab[0] = 0x%08x has bit 31 set after negative-diff update", rg.tab[0])
+	}
+}
+
+func TestVP8RandomBitsGolden(t *testing.T) {
+	// Exact output sequence for dithering=1.0, numBits=16.
+	// Guards against any change to the PRNG update step, including the
+	// 32-bit overflow fix (the & 0x7fffffff mask in RandomBits2).
+	want := []int{19987, 42957, 5448, 52772, 34853, 24576, 16, 53171, 8636, 35649}
+	var rg VP8Random
+	InitRandom(&rg, 1.0)
+	for i, w := range want {
+		if got := RandomBits(&rg, 16); got != w {
+			t.Errorf("call %d: got %d, want %d", i, got, w)
+		}
+	}
+}
