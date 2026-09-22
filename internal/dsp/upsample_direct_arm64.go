@@ -18,23 +18,37 @@ func UpsampleLinePairNRGBA(
 	alphaTop, alphaBot []byte,
 	width int,
 ) {
+	const maxStackWidth = 2048
+	var stackBuf [maxStackWidth * 2]uint32
+	UpsampleLinePairNRGBAWithScratch(
+		topY, botY, topU, topV, botU, botV, topDst, botDst,
+		alphaTop, alphaBot, width, stackBuf[:],
+	)
+}
+
+// UpsampleLinePairNRGBAWithScratch is equivalent to
+// UpsampleLinePairNRGBA but reuses caller-provided packed-UV storage.
+func UpsampleLinePairNRGBAWithScratch(
+	topY, botY []byte,
+	topU, topV []byte,
+	botU, botV []byte,
+	topDst, botDst []byte,
+	alphaTop, alphaBot []byte,
+	width int,
+	packedUV []uint32,
+) {
 	if width <= 0 {
 		return
 	}
 
-	// Packed UV temp buffer (one uint32 per pixel per row).
-	// Use stack-allocated array for common widths to avoid heap allocation.
-	const maxStackWidth = 2048
 	uvCount := width
 	if botY != nil {
 		uvCount = width * 2
 	}
-	var stackBuf [maxStackWidth * 2]uint32
-	var packedUV []uint32
-	if uvCount <= len(stackBuf) {
-		packedUV = stackBuf[:uvCount]
-	} else {
+	if cap(packedUV) < uvCount {
 		packedUV = make([]uint32, uvCount)
+	} else {
+		packedUV = packedUV[:uvCount]
 	}
 	tUV := packedUV[:width]
 	var bUV []uint32

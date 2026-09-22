@@ -403,8 +403,8 @@ func TestDecodeConfig_LibwebpTest(t *testing.T) {
 	if cfg.Width != 128 || cfg.Height != 128 {
 		t.Errorf("dimensions = %dx%d, want 128x128", cfg.Width, cfg.Height)
 	}
-	if cfg.ColorModel != color.YCbCrModel {
-		t.Errorf("color model should be YCbCrModel for lossy without alpha")
+	if cfg.ColorModel != color.NRGBAModel {
+		t.Errorf("color model should be NRGBAModel for lossy images")
 	}
 }
 
@@ -812,7 +812,7 @@ func TestDecodeConfig_ColorModel_AllFormats(t *testing.T) {
 			name:      "lossy_opaque",
 			img:       opaqueImg,
 			opts:      &EncoderOptions{Quality: 75},
-			wantModel: color.YCbCrModel,
+			wantModel: color.NRGBAModel,
 		},
 		{
 			name:      "lossless",
@@ -838,7 +838,7 @@ func TestDecodeConfig_ColorModel_AllFormats(t *testing.T) {
 				}
 				return o
 			}(),
-			wantModel: color.YCbCrModel,
+			wantModel: color.NRGBAModel,
 		},
 		{
 			name: "lossless_with_exif",

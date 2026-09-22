@@ -74,15 +74,11 @@ func TestDecodeReuseMatchesDecode(t *testing.T) {
 }
 
 func TestDecodeReuseIncompatibleFallsBack(t *testing.T) {
-	dataLossy := encodeTestWebP(t, false, false)   // → *image.YCbCr
-	dataLossless := encodeTestWebP(t, true, false) // → *image.NRGBA
+	dataLossless := encodeTestWebP(t, true, false)
 
 	// Reuse of the wrong type must be ignored, not crash.
-	img1, err := DecodeReuse(bytes.NewReader(dataLossy), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	img2, err := DecodeReuse(bytes.NewReader(dataLossless), img1)
+	wrongType := image.NewYCbCr(image.Rect(0, 0, 160, 120), image.YCbCrSubsampleRatio420)
+	img2, err := DecodeReuse(bytes.NewReader(dataLossless), wrongType)
 	if err != nil {
 		t.Fatal(err)
 	}

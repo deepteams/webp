@@ -53,6 +53,11 @@ func main() {
 }
 ```
 
+Lossy VP8 pixels are returned as `*image.NRGBA`. VP8 stores limited-range
+BT.601 YUV, while Go's `image.YCbCr` uses full-range JPEG semantics; converting
+during decode prevents black/white range contraction in standard `image`
+consumers and repeated WebP transcodes.
+
 ### Decode in a loop (zero-allocation)
 
 When decoding many images of similar size (thumbnails, video frames, batch

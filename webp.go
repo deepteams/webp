@@ -83,8 +83,7 @@ func readAll(r io.Reader) ([]byte, error) {
 }
 
 // Decode reads a WebP image from r and returns it as an image.Image.
-// For lossless images the returned type is *image.NRGBA.
-// For lossy images the returned type is *image.YCbCr (when available) or *image.NRGBA.
+// Decode returns decoded pixels as *image.NRGBA.
 func Decode(r io.Reader) (image.Image, error) {
 	return DecodeReuse(r, nil)
 }
@@ -133,21 +132,8 @@ func DecodeConfig(r io.Reader) (image.Config, error) {
 
 	feat := p.Features()
 
-	// Determine color model to match what Decode() actually returns:
-	//   - VP8L (lossless) always decodes to *image.NRGBA
-	//   - VP8 (lossy) without alpha decodes to *image.YCbCr
-	//   - VP8 (lossy) with alpha decodes to *image.NRGBA
-	cm := color.NRGBAModel
-	if frames := p.Frames(); len(frames) > 0 {
-		if !frames[0].IsLossless && frames[0].AlphaData == nil {
-			cm = color.YCbCrModel
-		}
-	} else if !feat.HasAlpha {
-		cm = color.YCbCrModel
-	}
-
 	return image.Config{
-		ColorModel: cm,
+		ColorModel: color.NRGBAModel,
 		Width:      feat.Width,
 		Height:     feat.Height,
 	}, nil
@@ -172,12 +158,12 @@ func GetFeatures(r io.Reader) (*Features, error) {
 
 	feat := p.Features()
 	f := &Features{
-		Width:      feat.Width,
-		Height:     feat.Height,
-		HasAlpha:   feat.HasAlpha,
+		Width:        feat.Width,
+		Height:       feat.Height,
+		HasAlpha:     feat.HasAlpha,
 		HasAnimation: feat.HasAnim,
-		FrameCount: len(p.Frames()),
-		LoopCount:  feat.LoopCount,
+		FrameCount:   len(p.Frames()),
+		LoopCount:    feat.LoopCount,
 	}
 
 	switch feat.Format {
@@ -276,71 +262,11 @@ func decodeFrameForAnimation(bitstreamData, alphaData []byte) (*image.NRGBA, err
 	if err != nil {
 		return nil, err
 	}
-	// Convert to NRGBA if needed.
-	if nrgba, ok := img.(*image.NRGBA); ok {
-		return nrgba, nil
-	}
-	// Fast path for *image.YCbCr (lossy without alpha).
-	if ycbcr, ok := img.(*image.YCbCr); ok {
-		return ycbcrToNRGBA(ycbcr), nil
-	}
-	b := img.Bounds()
-	nrgba := image.NewNRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
-	for y := b.Min.Y; y < b.Max.Y; y++ {
-		for x := b.Min.X; x < b.Max.X; x++ {
-			nrgba.Set(x-b.Min.X, y-b.Min.Y, img.At(x, y))
-		}
-	}
-	return nrgba, nil
+	return img.(*image.NRGBA), nil
 }
 
-// ycbcrToNRGBA converts a 4:2:0 YCbCr image to NRGBA using direct
-// YCbCr→RGB conversion (no fancy upsampling, as animation compositing
-// doesn't require it).
-func ycbcrToNRGBA(ycbcr *image.YCbCr) *image.NRGBA {
-	w := ycbcr.Rect.Dx()
-	h := ycbcr.Rect.Dy()
-	nrgba := image.NewNRGBA(image.Rect(0, 0, w, h))
-	for y := 0; y < h; y++ {
-		yi := y * ycbcr.YStride
-		ci := (y >> 1) * ycbcr.CStride
-		di := y * nrgba.Stride
-		for x := 0; x < w; x++ {
-			yy := int32(ycbcr.Y[yi+x])
-			cb := int32(ycbcr.Cb[ci+(x>>1)]) - 128
-			cr := int32(ycbcr.Cr[ci+(x>>1)]) - 128
-			r := yy + (91881*cr+32768)>>16
-			g := yy - (22554*cb+46802*cr+32768)>>16
-			b := yy + (116130*cb+32768)>>16
-			if r < 0 {
-				r = 0
-			} else if r > 255 {
-				r = 255
-			}
-			if g < 0 {
-				g = 0
-			} else if g > 255 {
-				g = 255
-			}
-			if b < 0 {
-				b = 0
-			} else if b > 255 {
-				b = 255
-			}
-			nrgba.Pix[di] = byte(r)
-			nrgba.Pix[di+1] = byte(g)
-			nrgba.Pix[di+2] = byte(b)
-			nrgba.Pix[di+3] = 255
-			di += 4
-		}
-	}
-	return nrgba
-}
-
-// decodeLossy decodes a VP8 lossy bitstream.
-// Without alpha data it returns *image.YCbCr (4:2:0) — no colour-space
-// conversion needed, just a plane copy.  With alpha it falls back to
-// *image.NRGBA using fancy chroma upsampling.
+// decodeLossy decodes a VP8 lossy bitstream to NRGBA using fancy chroma
+// upsampling and WebP's limited-range BT.601 YUV conversion.
 func decodeLossy(data []byte, alphaData []byte, reuse image.Image) (image.Image, error) {
 	dec, width, height, yPlane, yStride, uPlane, vPlane, uvStride, err := lossy.DecodeFrame(data)
 	if err != nil {
@@ -357,52 +283,8 @@ func decodeLossy(data []byte, alphaData []byte, reuse image.Image) (image.Image,
 		}
 	}
 
-	// Fast path: no alpha → return *image.YCbCr directly.
-	if alphaPlane == nil {
-		prev, _ := reuse.(*image.YCbCr)
-		return buildYCbCr(width, height, yPlane, yStride, uPlane, vPlane, uvStride, prev), nil
-	}
-
-	// Slow path: alpha present → NRGBA with fancy chroma upsampling.
 	prev, _ := reuse.(*image.NRGBA)
 	return buildNRGBA(width, height, yPlane, yStride, uPlane, vPlane, uvStride, alphaPlane, prev), nil
-}
-
-// buildYCbCr copies the decoder's Y/U/V cache planes into an image.YCbCr.
-// The decoder's slab is returned to the pool after this function, so the
-// data must be copied out. If reuse comes from a previous buildYCbCr call
-// and its contiguous backing buffer is large enough, it is reused.
-func buildYCbCr(width, height int, yPlane []byte, yStride int, uPlane, vPlane []byte, uvStride int, reuse *image.YCbCr) *image.YCbCr {
-	chromaH := (height + 1) / 2
-
-	yLen := height * yStride
-	cLen := chromaH * uvStride
-	totalSize := uint64(yLen) + 2*uint64(cLen)
-	if totalSize > 1<<30 {
-		return nil
-	}
-	var buf []byte
-	if reuse != nil && cap(reuse.Y) >= yLen+2*cLen {
-		// Images built here use one contiguous allocation with Y at its
-		// start, so cap(Y) sees the full buffer.
-		buf = reuse.Y[:yLen+2*cLen]
-	} else {
-		buf = make([]byte, yLen+2*cLen)
-	}
-
-	copy(buf[:yLen], yPlane[:yLen])
-	copy(buf[yLen:yLen+cLen], uPlane[:cLen])
-	copy(buf[yLen+cLen:], vPlane[:cLen])
-
-	return &image.YCbCr{
-		Y:              buf[:yLen],
-		Cb:             buf[yLen : yLen+cLen],
-		Cr:             buf[yLen+cLen:],
-		YStride:        yStride,
-		CStride:        uvStride,
-		SubsampleRatio: image.YCbCrSubsampleRatio420,
-		Rect:           image.Rect(0, 0, width, height),
-	}
 }
 
 // buildNRGBA constructs an *image.NRGBA from raw YUV planes + alpha using
@@ -444,19 +326,27 @@ func buildNRGBA(width, height int, yPlane []byte, yStride int, uPlane, vPlane []
 		off := row * img.Stride
 		return img.Pix[off : off+width*4]
 	}
+	// Reuse the packed chroma workspace across row pairs. The SIMD dispatch
+	// otherwise creates and clears the same temporary buffer for every pair.
+	const maxStackWidth = 2048
+	var stackScratch [maxStackWidth * 2]uint32
+	scratch := stackScratch[:]
+	if width > maxStackWidth {
+		scratch = make([]uint32, width*2)
+	}
 
 	if height == 1 {
-		dsp.UpsampleLinePairNRGBA(
+		dsp.UpsampleLinePairNRGBAWithScratch(
 			yRow(0), nil, uRow(0), vRow(0), uRow(0), vRow(0),
-			dstRow(0), nil, aRow(0), nil, width,
+			dstRow(0), nil, aRow(0), nil, width, scratch,
 		)
 		return img
 	}
 
 	// Row 0: mirror chroma.
-	dsp.UpsampleLinePairNRGBA(
+	dsp.UpsampleLinePairNRGBAWithScratch(
 		yRow(0), nil, uRow(0), vRow(0), uRow(0), vRow(0),
-		dstRow(0), nil, aRow(0), nil, width,
+		dstRow(0), nil, aRow(0), nil, width, scratch,
 	)
 
 	// Overlapping pairs.
@@ -464,13 +354,13 @@ func buildNRGBA(width, height int, yPlane []byte, yStride int, uPlane, vPlane []
 	for y+2 < height {
 		chromaTop := y / 2
 		chromaBot := chromaTop + 1
-		dsp.UpsampleLinePairNRGBA(
+		dsp.UpsampleLinePairNRGBAWithScratch(
 			yRow(y+1), yRow(y+2),
 			uRow(chromaTop), vRow(chromaTop),
 			uRow(chromaBot), vRow(chromaBot),
 			dstRow(y+1), dstRow(y+2),
 			aRow(y+1), aRow(y+2),
-			width,
+			width, scratch,
 		)
 		y += 2
 	}
@@ -478,13 +368,13 @@ func buildNRGBA(width, height int, yPlane []byte, yStride int, uPlane, vPlane []
 	// Last row for even-height images.
 	if height&1 == 0 {
 		lastChroma := (height - 1) / 2
-		dsp.UpsampleLinePairNRGBA(
+		dsp.UpsampleLinePairNRGBAWithScratch(
 			yRow(height-1), nil,
 			uRow(lastChroma), vRow(lastChroma),
 			uRow(lastChroma), vRow(lastChroma),
 			dstRow(height-1), nil,
 			aRow(height-1), nil,
-			width,
+			width, scratch,
 		)
 	}
 

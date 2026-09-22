@@ -1,6 +1,7 @@
 package dsp
 
 import (
+	"bytes"
 	"math/rand"
 	"testing"
 )
@@ -29,14 +30,16 @@ func TestLoadUV(t *testing.T) {
 // the correct values for a known 2x2 chroma block.
 //
 // Given chroma:
-//   [a b]   =  [100 200]
-//   [c d]      [150 250]
+//
+//	[a b]   =  [100 200]
+//	[c d]      [150 250]
 //
 // The four interpolated sub-pixels should be:
-//   top-left  = (9*a + 3*b + 3*c +   d + 8) / 16 = (900+600+450+250+8)/16 = 137
-//   top-right = (3*a + 9*b +   c + 3*d + 8) / 16 = (300+1800+150+750+8)/16 = 188
-//   bot-left  = (3*a +   b + 9*c + 3*d + 8) / 16 = (300+200+1350+750+8)/16 = 163
-//   bot-right = (  a + 3*b + 3*c + 9*d + 8) / 16 = (100+600+450+2250+8)/16 = 213
+//
+//	top-left  = (9*a + 3*b + 3*c +   d + 8) / 16 = (900+600+450+250+8)/16 = 137
+//	top-right = (3*a + 9*b +   c + 3*d + 8) / 16 = (300+1800+150+750+8)/16 = 188
+//	bot-left  = (3*a +   b + 9*c + 3*d + 8) / 16 = (300+200+1350+750+8)/16 = 163
+//	bot-right = (  a + 3*b + 3*c + 9*d + 8) / 16 = (100+600+450+2250+8)/16 = 213
 func TestDiamondKernelValues(t *testing.T) {
 	// We use a 2-pixel wide image (width=2) so the upsampler produces exactly
 	// 2 luma columns from 1 pair of chroma samples.
@@ -385,6 +388,38 @@ func TestUpsampleLinePairNRGBAConformanceNilBot(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestUpsampleLinePairNRGBAWithScratchMatchesDispatch(t *testing.T) {
+	const width = 65
+	rng := rand.New(rand.NewSource(101))
+	chromaW := (width + 1) / 2
+	topY := makeRandBuf(rng, width)
+	botY := makeRandBuf(rng, width)
+	topU := makeRandBuf(rng, chromaW)
+	topV := makeRandBuf(rng, chromaW)
+	botU := makeRandBuf(rng, chromaW)
+	botV := makeRandBuf(rng, chromaW)
+	alphaTop := makeRandBuf(rng, width)
+	alphaBot := makeRandBuf(rng, width)
+
+	wantTop := make([]byte, width*4)
+	wantBot := make([]byte, width*4)
+	UpsampleLinePairNRGBA(topY, botY, topU, topV, botU, botV,
+		wantTop, wantBot, alphaTop, alphaBot, width)
+
+	gotTop := make([]byte, width*4)
+	gotBot := make([]byte, width*4)
+	scratch := make([]uint32, width*2)
+	UpsampleLinePairNRGBAWithScratch(topY, botY, topU, topV, botU, botV,
+		gotTop, gotBot, alphaTop, alphaBot, width, scratch)
+
+	if !bytes.Equal(gotTop, wantTop) {
+		t.Fatal("top row differs when caller-provided scratch is used")
+	}
+	if !bytes.Equal(gotBot, wantBot) {
+		t.Fatal("bottom row differs when caller-provided scratch is used")
 	}
 }
 

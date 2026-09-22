@@ -15,3 +15,17 @@ func UpsampleLinePairNRGBA(
 ) {
 	upsampleLinePairNRGBAGo(topY, botY, topU, topV, botU, botV, topDst, botDst, alphaTop, alphaBot, width)
 }
+
+// UpsampleLinePairNRGBAWithScratch is equivalent to
+// UpsampleLinePairNRGBA. The pure Go implementation does not need scratch.
+func UpsampleLinePairNRGBAWithScratch(
+	topY, botY []byte,
+	topU, topV []byte,
+	botU, botV []byte,
+	topDst, botDst []byte,
+	alphaTop, alphaBot []byte,
+	width int,
+	_ []uint32,
+) {
+	upsampleLinePairNRGBAGo(topY, botY, topU, topV, botU, botV, topDst, botDst, alphaTop, alphaBot, width)
+}
