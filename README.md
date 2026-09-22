@@ -223,37 +223,39 @@ gwebp info photo.webp
 
 ## Performance
 
-Benchmarked on Apple M5 Max (arm64), 1536x1024 RGB image, Go 1.24.2. Median of 10 runs.
+Benchmarked on Apple M5 Max (macOS, arm64), Go 1.27.0, `GOMAXPROCS=18`, on 2026-09-22 at `v1.2.8` (`56711c6`). Source: `testdata/test_color.png`, 1536x1024. Values are medians of 10 runs using the default 1-second benchmark duration.
 
-### Encode (1536x1024, Quality 75)
+### Encode (1536x1024, Quality 75 for lossy)
 
 | Library | Mode | Time | MB/s | B/op | Allocs |
-|---------|------|-----:|-----:|------:|-------:|
-| **deepteams/webp** (Pure Go) | Lossy | **47.8 ms** | 4.0 | 1.2 MB | 166 |
-| gen2brain/webp (WASM) | Lossy | 56.9 ms | 4.4 | 13 KB | 12 |
-| chai2010/webp (CGo) | Lossy | 76.4 ms | 2.7 | 222 KB | 4 |
-| **deepteams/webp** (Pure Go) | Lossless | **116 ms** | 15.8 | 20.1 MB | 1,177 |
-| gen2brain/webp (WASM) | Lossless | 187 ms | 11.0 | 335 KB | 12 |
-| nativewebp (Pure Go) | Lossless | 280 ms | 7.2 | 85 MB | 2,155 |
-| chai2010/webp (CGo) | Lossless | 929 ms | 1.9 | 2.5 MB | 4 |
+|---------|------|-----:|-----:|-----:|-------:|
+| **deepteams/webp** (Pure Go) | Lossy | 48.2 ms | 4.01 | 1.24 MB | 171 |
+| gen2brain/webp (WASM) | Lossy | 58.0 ms | 4.36 | 12.9 KB | 12 |
+| chai2010/webp (CGo) | Lossy | 77.1 ms | 2.71 | 227.4 KB | 4 |
+| **deepteams/webp** (Pure Go) | Lossless | 117.0 ms | 15.62 | 21.04 MB | 1,176 |
+| gen2brain/webp (WASM) | Lossless | 191.5 ms | 10.73 | 342.9 KB | 12 |
+| nativewebp (Pure Go) | Lossless | 281.2 ms | 7.16 | 89.29 MB | 2,155 |
+| chai2010/webp (CGo) | Lossless | 951.4 ms | 1.84 | 2.63 MB | 4 |
 
 ### Decode (1536x1024)
 
 | Library | Mode | Time | MB/s | B/op | Allocs |
-|---------|------|-----:|-----:|------:|-------:|
-| **deepteams/webp** (Pure Go) | Lossy | **9.3 ms** | 20.7 | 2.5 MB | 7 |
-| chai2010/webp (CGo) | Lossy | 9.6 ms | 21.8 | 6.4 MB | 23 |
-| golang.org/x/image/webp | Lossy | 18.4 ms | 10.5 | 2.5 MB | 13 |
-| gen2brain/webp (WASM) | Lossy | 22.2 ms | 11.4 | 608 KB | 40 |
-| **deepteams/webp** (Pure Go) | Lossless | **17.0 ms** | 107.3 | 8.3 MB | 225 |
-| chai2010/webp (CGo) | Lossless | 19.2 ms | 91.3 | 10.2 MB | 30 |
-| gen2brain/webp (WASM) | Lossless | 34.0 ms | 60.4 | 4.4 MB | 46 |
-| nativewebp (Pure Go) | Lossless | 35.6 ms | 56.5 | 6.1 MB | 50 |
-| golang.org/x/image/webp | Lossless | 38.7 ms | 47.3 | 6.8 MB | 966 |
+|---------|------|-----:|-----:|-----:|-------:|
+| chai2010/webp (CGo) | Lossy | 9.53 ms | 21.94 | 6.76 MB | 23 |
+| **deepteams/webp** (Pure Go) | Lossy | 11.0 ms | 17.62 | 6.51 MB | 7 |
+| golang.org/x/image/webp | Lossy | 18.4 ms | 10.49 | 2.59 MB | 13 |
+| gen2brain/webp (WASM) | Lossy | 22.9 ms | 11.04 | 622.1 KB | 40 |
+| **deepteams/webp** (Pure Go) | Lossless | 17.4 ms | 104.81 | 8.68 MB | 225 |
+| chai2010/webp (CGo) | Lossless | 19.1 ms | 91.74 | 10.65 MB | 30 |
+| gen2brain/webp (WASM) | Lossless | 34.6 ms | 59.31 | 4.66 MB | 46 |
+| nativewebp (Pure Go) | Lossless | 36.3 ms | 55.49 | 6.35 MB | 50 |
+| golang.org/x/image/webp | Lossless | 40.0 ms | 45.62 | 7.14 MB | 966 |
 
-In a decode loop, [`DecodeReuse`](#decode-in-a-loop-zero-allocation) drops per-decode allocations from megabytes to a few KB (see `BenchmarkDecodeLossyReuse` / `BenchmarkDecodeLosslessReuse`).
+These results describe this image and the benchmark's existing settings. `MB/s` uses compressed bytes, not decoded pixels; `B/op` and allocation counts cover Go heap allocations, not total native/WASM memory. Decoder inputs and output color models differ between libraries, so timings are not a comparison of identical work. In particular, deepteams/webp now returns range-correct `*image.NRGBA` for lossy images; older YCbCr decode timings are not equivalent.
 
-Lossy encoding uses row-pipelined parallelism that scales with available cores. Hot DSP kernels (transforms, intra predictors, loop filters, YUV upsampling, lossless inverse transforms) are SIMD-accelerated on both arm64 (NEON) and amd64 (SSE2/AVX2), with pure Go fallbacks everywhere else. See [`benchmark/`](benchmark/) for full methodology, 10-run statistics, and small-image results.
+[`DecodeReuse`](#decode-in-a-loop-zero-allocation) can reuse compatible output pixel buffers. The tables above measure `Decode` with a fresh output image; see `BenchmarkDecodeLossyReuse` / `BenchmarkDecodeLosslessReuse` in the root package for reuse benchmarks.
+
+Lossy encoding uses row-pipelined parallelism that scales with available cores. Hot DSP kernels are SIMD-accelerated on arm64 (NEON) and amd64 (SSE2/AVX2), with pure Go fallbacks on other architectures. This run measures ARM64 only. See [`benchmark/`](benchmark/) for library versions, methodology, small-image results, and the saved raw measurements.
 
 ```bash
 cd benchmark && go test -bench=. -benchmem -count=10 -run='^$' -timeout=30m
