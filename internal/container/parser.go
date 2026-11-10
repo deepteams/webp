@@ -232,6 +232,13 @@ func (p *Parser) parseVP8XChunks(buf []byte) error {
 			if err != nil {
 				return err
 			}
+			// The frame must lie entirely within the canvas, otherwise the
+			// canvas size reported by DecodeConfig would not bound the
+			// decoded image size.
+			if uint64(frame.XOffset)+uint64(frame.Width) > uint64(p.features.CanvasWidth) ||
+				uint64(frame.YOffset)+uint64(frame.Height) > uint64(p.features.CanvasHeight) {
+				return fmt.Errorf("%w: frame exceeds canvas", ErrInvalidImage)
+			}
 			p.frames = append(p.frames, frame)
 
 		case FourCCVP8, FourCCVP8L:
@@ -427,9 +434,12 @@ func parseFrameSubChunks(frame FrameInfo, buf []byte) (FrameInfo, error) {
 			if alphPayload != nil {
 				return FrameInfo{}, ErrInvalidChunk
 			}
-			_, _, alpha, err := parseVP8LHeader(payload)
+			w, h, alpha, err := parseVP8LHeader(payload)
 			if err != nil {
 				return FrameInfo{}, err
+			}
+			if w != frame.Width || h != frame.Height {
+				return FrameInfo{}, fmt.Errorf("%w: VP8L size %dx%d does not match ANMF size %dx%d", ErrInvalidImage, w, h, frame.Width, frame.Height)
 			}
 			frame.IsLossless = true
 			if alpha {
@@ -439,6 +449,13 @@ func parseFrameSubChunks(frame FrameInfo, buf []byte) (FrameInfo, error) {
 			return frame, nil
 
 		case FourCCVP8:
+			w, h, err := parseVP8Header(payload)
+			if err != nil {
+				return FrameInfo{}, err
+			}
+			if w != frame.Width || h != frame.Height {
+				return FrameInfo{}, fmt.Errorf("%w: VP8 size %dx%d does not match ANMF size %dx%d", ErrInvalidImage, w, h, frame.Width, frame.Height)
+			}
 			frame.IsLossless = false
 			frame.Payload = payload
 			frame.AlphaData = alphPayload
