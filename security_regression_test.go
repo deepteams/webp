@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"image"
 	"image/color"
+	"runtime"
 	"testing"
 	"time"
 
@@ -280,5 +281,109 @@ func TestSecurityLossyPartitionsSkippedMacroblocks(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// A palette (<=16 colours, packed pixels) combined with another transform is
+// inverted in place; unpacking used to overwrite packed indices not yet read,
+// corrupting files produced by this package's own encoder (and by cwebp).
+func TestSecurityLosslessPaletteInPlace(t *testing.T) {
+	pal := []color.NRGBA{{200, 55, 100, 255}, {0, 255, 0, 255}, {10, 20, 30, 255}, {255, 255, 255, 255}}
+	for _, colors := range []int{2, 4, 16} {
+		const w, h = 97, 33
+		img := image.NewNRGBA(image.Rect(0, 0, w, h))
+		seed := uint32(colors)
+		for y := 0; y < h; y++ {
+			for x := 0; x < w; x++ {
+				seed = seed*1664525 + 1013904223
+				i := (x + y) % colors
+				if x%3 == 0 {
+					i = int(seed>>16) % colors
+				}
+				c := pal[i%len(pal)]
+				c.B = uint8(i * 15)
+				img.SetNRGBA(x, y, c)
+			}
+		}
+		for _, m := range []int{4, 5, 6} {
+			opts := &EncoderOptions{Lossless: true, Method: m, Quality: 100, Exact: true}
+			got := encodeAndDecode(t, img, opts).(*image.NRGBA)
+			if !bytes.Equal(got.Pix, img.Pix) {
+				t.Errorf("colors=%d method=%d: lossless round trip is not exact", colors, m)
+			}
+		}
+	}
+}
+
+// Encoding a SubImage as an animation frame must not leak pixels from the
+// parent image outside the crop.
+func TestSecurityAnimEncoderSubImage(t *testing.T) {
+	red := color.NRGBA{255, 0, 0, 255}
+	parent := image.NewNRGBA(image.Rect(0, 0, 96, 64))
+	for i := 0; i < len(parent.Pix); i += 4 {
+		copy(parent.Pix[i:], []uint8{red.R, red.G, red.B, red.A})
+	}
+	crop := image.Rect(10, 7, 50, 40)
+	for y := crop.Min.Y; y < crop.Max.Y; y++ {
+		for x := crop.Min.X; x < crop.Max.X; x++ {
+			parent.SetNRGBA(x, y, color.NRGBA{uint8(x * 3), 120, uint8(y * 5), 255})
+		}
+	}
+	sub := parent.SubImage(crop).(*image.NRGBA)
+	for _, opts := range []animation.EncodeOptions{{Lossless: true}, {AllowMixed: true, Quality: 90}} {
+		for _, frames := range []int{1, 3} {
+			var buf bytes.Buffer
+			enc := animation.NewEncoder(&buf, crop.Dx(), crop.Dy(), &opts)
+			for i := 0; i < frames; i++ {
+				if err := enc.AddFrame(sub, 50*time.Millisecond); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := enc.Close(); err != nil {
+				t.Fatal(err)
+			}
+			img, err := Decode(bytes.NewReader(buf.Bytes()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			n := img.(*image.NRGBA)
+			for y := 0; y < crop.Dy(); y++ {
+				for x := 0; x < crop.Dx(); x++ {
+					if n.NRGBAAt(x, y) != sub.NRGBAAt(crop.Min.X+x, crop.Min.Y+y) {
+						t.Fatalf("%+v frames=%d: pixel (%d,%d) = %v, want %v", opts, frames, x, y, n.NRGBAAt(x, y), sub.NRGBAAt(crop.Min.X+x, crop.Min.Y+y))
+					}
+				}
+			}
+		}
+	}
+}
+
+// The demuxer applies the same canvas area limit as the container parser,
+// and the animation decoder does not allocate its canvas before a frame is
+// available.
+func TestSecurityAnimCanvasLimits(t *testing.T) {
+	bs := secBitstream(t, 1, 1, true)
+	huge := secAnimFile(1<<16, 1<<14, 0, 0, 1, 1, bs, true) // 2^30 pixels
+	if _, err := animation.DecodeBytes(huge); err == nil {
+		t.Error("animation.DecodeBytes accepted a 2^30-pixel canvas")
+	}
+
+	big := secAnimFile(8192, 8192, 0, 0, 1, 1, bs, true) // 256 MiB per canvas buffer
+	anim, err := animation.DecodeBytes(big)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m0, m1 runtime.MemStats
+	runtime.ReadMemStats(&m0)
+	dec, err := animation.NewAnimDecoder(anim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := dec.NextFrame(); err == nil { // frames not decoded yet
+		t.Fatal("NextFrame succeeded without decoded frames")
+	}
+	runtime.ReadMemStats(&m1)
+	if d := m1.TotalAlloc - m0.TotalAlloc; d > 16<<20 {
+		t.Errorf("NewAnimDecoder + failing NextFrame allocated %d MiB", d>>20)
 	}
 }
