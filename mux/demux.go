@@ -221,6 +221,11 @@ func (d *Demuxer) parse() error {
 		return ErrInvalidRIFF
 	}
 	fileSize := binary.LittleEndian.Uint32(d.data[4:8])
+	// The RIFF size covers at least the "WEBP" tag plus one chunk header.
+	// Smaller values would make totalSize < RIFFHeaderSize below.
+	if fileSize < container.ChunkHeaderSize {
+		return ErrInvalidRIFF
+	}
 	webpTag := binary.LittleEndian.Uint32(d.data[8:12])
 	if webpTag != FourCCWEBP {
 		return ErrInvalidRIFF
