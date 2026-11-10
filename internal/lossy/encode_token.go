@@ -29,8 +29,12 @@ type TokenBuffer struct {
 	pages    []*tokenPage
 	curPage  *tokenPage
 	totalMB  int
-	// Per-macroblock page index (so we can emit partitioned).
-	mbStart []int // page index at start of each MB
+	// Per-macroblock token offset (so we can emit partitioned).
+	mbStart []int // token index at start of each MB (+ end sentinel)
+	// nextMB is the lowest MB index whose start has not been recorded in
+	// the current pass. Skipped MBs record no tokens and are never marked
+	// explicitly, so MarkMBStart back-fills them.
+	nextMB int
 	// Pool of previously allocated pages to avoid GC pressure.
 	allPages []*tokenPage
 }
@@ -51,6 +55,7 @@ func (tb *TokenBuffer) Reset() {
 	}
 	tb.pages = tb.pages[:0]
 	tb.curPage = nil
+	tb.nextMB = 0
 	tb.addPage()
 }
 
@@ -85,9 +90,16 @@ func (tb *TokenBuffer) RecordToken(bit int, prob uint8) {
 }
 
 // MarkMBStart records that the given macroblock index begins at this point
-// in the token stream.
+// in the token stream. Tokens are recorded in macroblock raster order, so
+// every macroblock skipped since the previous mark (which recorded no
+// tokens) also starts here; their entries are filled in as well so that no
+// stale offset from a previous pass or encode survives.
 func (tb *TokenBuffer) MarkMBStart(mbIdx int) {
-	tb.mbStart[mbIdx] = tb.tokenCount()
+	n := tb.tokenCount()
+	for ; tb.nextMB <= mbIdx; tb.nextMB++ {
+		tb.mbStart[tb.nextMB] = n
+	}
+	tb.mbStart[mbIdx] = n
 }
 
 // tokenCount returns the total number of tokens recorded so far.
@@ -327,8 +339,9 @@ func (tb *TokenBuffer) EmitTokensPartitioned(bw *bitio.BoolWriter, partIdx, numP
 	}
 
 	totalMB := tb.totalMB
-	// Mark the end sentinel so we know the range of the last MB.
-	tb.mbStart[totalMB] = tb.tokenCount()
+	// Mark trailing skipped MBs and the end sentinel so we know the range
+	// of the last MB.
+	tb.MarkMBStart(totalMB)
 
 	for mbIdx := 0; mbIdx < totalMB; mbIdx++ {
 		mbY := mbIdx / mbW

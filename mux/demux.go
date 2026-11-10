@@ -221,6 +221,11 @@ func (d *Demuxer) parse() error {
 		return ErrInvalidRIFF
 	}
 	fileSize := binary.LittleEndian.Uint32(d.data[4:8])
+	// The RIFF size covers at least the "WEBP" tag plus one chunk header.
+	// Smaller values would make totalSize < RIFFHeaderSize below.
+	if fileSize < container.ChunkHeaderSize {
+		return ErrInvalidRIFF
+	}
 	webpTag := binary.LittleEndian.Uint32(d.data[8:12])
 	if webpTag != FourCCWEBP {
 		return ErrInvalidRIFF
@@ -325,6 +330,10 @@ func (d *Demuxer) parseExtended(payload []byte) error {
 	canvasWidth++
 	canvasHeight := int(vp8x.Data[7]) | int(vp8x.Data[8])<<8 | int(vp8x.Data[9])<<16
 	canvasHeight++
+	// Same canvas area limit as the container parser used by webp.Decode.
+	if uint64(canvasWidth)*uint64(canvasHeight) >= container.MaxImageArea {
+		return fmt.Errorf("%w: canvas %dx%d too large", ErrInvalidVP8X, canvasWidth, canvasHeight)
+	}
 
 	d.features = Features{
 		Width:        canvasWidth,
@@ -431,6 +440,7 @@ func (d *Demuxer) parseANMF(data []byte) error {
 	// The rest of the ANMF payload contains the frame's image sub-chunks.
 	framePayload := data[container.ANMFChunkSize:]
 	var imageData []byte
+	var imageID ChunkID
 	var alphaData []byte
 
 	pos := 0
@@ -450,6 +460,7 @@ func (d *Demuxer) parseANMF(data []byte) error {
 		switch subID {
 		case FourCCVP8, FourCCVP8L:
 			imageData = subData
+			imageID = subID
 		case FourCCALPH:
 			alphaData = subData
 		}
@@ -469,6 +480,21 @@ func (d *Demuxer) parseANMF(data []byte) error {
 	hasAlpha := len(alphaData) > 0
 	if !hasAlpha && len(imageData) > 0 {
 		hasAlpha = frameDataHasAlpha(imageData)
+	}
+
+	// Like libwebp's demuxer, the frame size is the bitstream size, and the
+	// frame must lie within the canvas. Otherwise a tiny canvas could hide
+	// an arbitrarily large frame from callers that bound the canvas size.
+	if len(imageData) > 0 {
+		w, h, err := container.BitstreamSize(imageID, imageData)
+		if err != nil {
+			return fmt.Errorf("%w: frame bitstream: %v", ErrInvalidANMF, err)
+		}
+		width, height = w, h
+	}
+	if uint64(offsetX)+uint64(width) > uint64(d.features.Width) ||
+		uint64(offsetY)+uint64(height) > uint64(d.features.Height) {
+		return fmt.Errorf("%w: frame %dx%d at (%d,%d) exceeds canvas %dx%d", ErrInvalidANMF, width, height, offsetX, offsetY, d.features.Width, d.features.Height)
 	}
 
 	if len(d.frames) >= maxFrames {

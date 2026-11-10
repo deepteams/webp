@@ -65,11 +65,14 @@ func ReadChunk(data []byte) (Chunk, int, error) {
 	if err != nil {
 		return Chunk{}, 0, err
 	}
-	payloadEnd := container.ChunkHeaderSize + int(size)
-	if payloadEnd > len(data) {
+	// Compare in uint64: on 32-bit platforms int(size) can overflow to a
+	// negative value and slip past the bounds check.
+	payloadEnd64 := uint64(container.ChunkHeaderSize) + uint64(size)
+	if payloadEnd64 > uint64(len(data)) {
 		return Chunk{}, 0, fmt.Errorf("mux: chunk %s payload truncated: need %d bytes, have %d",
-			fourCCString(id), payloadEnd, len(data))
+			fourCCString(id), payloadEnd64, len(data))
 	}
+	payloadEnd := int(payloadEnd64)
 	c := Chunk{
 		ID:   id,
 		Size: size,

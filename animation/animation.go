@@ -294,6 +294,12 @@ const maxCanvasArea = uint64(1) << 30 // ~1 billion pixels, ~4GB NRGBA max
 // NewAnimDecoder creates an AnimDecoder from an Animation.
 // The canvas is initialized to transparent (0,0,0,0), matching the C reference.
 // Returns an error if canvas dimensions are invalid or exceed safety limits.
+//
+// The two canvas buffers (8 bytes per canvas pixel) are allocated lazily, on
+// the first NextFrame whose frame image is available, so a file that fails
+// to decode costs no canvas memory. Every frame lies within the canvas, so
+// callers decoding untrusted input should bound
+// anim.CanvasWidth*anim.CanvasHeight before decoding.
 func NewAnimDecoder(anim *Animation) (*AnimDecoder, error) {
 	if anim.CanvasWidth <= 0 || anim.CanvasHeight <= 0 {
 		return nil, fmt.Errorf("animation: invalid canvas %dx%d", anim.CanvasWidth, anim.CanvasHeight)
@@ -302,14 +308,18 @@ func NewAnimDecoder(anim *Animation) (*AnimDecoder, error) {
 	if area > maxCanvasArea {
 		return nil, fmt.Errorf("animation: canvas too large (%dx%d = %d pixels, max %d)", anim.CanvasWidth, anim.CanvasHeight, area, maxCanvasArea)
 	}
-	bounds := image.Rect(0, 0, anim.CanvasWidth, anim.CanvasHeight)
-	d := &AnimDecoder{
-		anim:              anim,
-		currFrame:         image.NewNRGBA(bounds),
-		prevFrameDisposed: image.NewNRGBA(bounds),
+	return &AnimDecoder{anim: anim}, nil
+}
+
+// ensureCanvas allocates the canvas buffers on first use. Both start
+// zero-filled (transparent), matching C calloc behavior.
+func (d *AnimDecoder) ensureCanvas() {
+	if d.currFrame != nil {
+		return
 	}
-	// Both buffers start as zero-filled (transparent), matching C calloc behavior.
-	return d, nil
+	bounds := image.Rect(0, 0, d.anim.CanvasWidth, d.anim.CanvasHeight)
+	d.currFrame = image.NewNRGBA(bounds)
+	d.prevFrameDisposed = image.NewNRGBA(bounds)
 }
 
 // HasNext reports whether more frames are available.
@@ -370,6 +380,7 @@ func (d *AnimDecoder) NextFrame() (*image.NRGBA, time.Duration, error) {
 	if f.Image == nil {
 		return nil, 0, ErrNilImage
 	}
+	d.ensureCanvas()
 
 	keyFrame := d.isKeyFrame(d.pos)
 
@@ -407,8 +418,10 @@ func (d *AnimDecoder) NextFrame() (*image.NRGBA, time.Duration, error) {
 // Reset rewinds the decoder to the first frame and clears the canvas.
 func (d *AnimDecoder) Reset() {
 	d.pos = 0
-	clearCanvas(d.currFrame)
-	clearCanvas(d.prevFrameDisposed)
+	if d.currFrame != nil {
+		clearCanvas(d.currFrame)
+		clearCanvas(d.prevFrameDisposed)
+	}
 	d.prevFrameWasKeyframe = false
 	d.prevDispose = DisposeNone
 	d.prevBounds = image.Rectangle{}
@@ -416,6 +429,7 @@ func (d *AnimDecoder) Reset() {
 
 // Canvas returns the current canvas state (not a copy).
 func (d *AnimDecoder) Canvas() *image.NRGBA {
+	d.ensureCanvas()
 	return d.currFrame
 }
 
@@ -1128,8 +1142,13 @@ func extractSubImage(src *image.NRGBA, rect image.Rectangle) *image.NRGBA {
 
 // cloneNRGBA creates a deep copy of an NRGBA image.
 func cloneNRGBA(src *image.NRGBA) *image.NRGBA {
-	dst := image.NewNRGBA(src.Bounds())
-	copy(dst.Pix, src.Pix)
+	b := src.Bounds()
+	dst := image.NewNRGBA(b)
+	rowBytes := 4 * b.Dx()
+	for y := 0; y < b.Dy(); y++ {
+		off := src.PixOffset(b.Min.X, b.Min.Y+y)
+		copy(dst.Pix[y*dst.Stride:y*dst.Stride+rowBytes], src.Pix[off:off+rowBytes])
+	}
 	return dst
 }
 

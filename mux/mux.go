@@ -479,8 +479,10 @@ func splitAlphaAndBitstream(data []byte) (alphaData, bitstream []byte) {
 		possibleID := binary.LittleEndian.Uint32(data[0:4])
 		if possibleID == FourCCALPH {
 			alphSize := binary.LittleEndian.Uint32(data[4:8])
-			alphEnd := container.ChunkHeaderSize + int(alphSize)
-			if alphEnd <= len(data) {
+			// uint64 avoids int overflow on 32-bit platforms.
+			alphEnd64 := uint64(container.ChunkHeaderSize) + uint64(alphSize)
+			if alphEnd64 <= uint64(len(data)) {
+				alphEnd := int(alphEnd64)
 				alphaData = data[container.ChunkHeaderSize:alphEnd]
 				rest := alphEnd
 				// Skip padding byte if needed.
