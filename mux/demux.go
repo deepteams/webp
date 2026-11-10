@@ -330,6 +330,10 @@ func (d *Demuxer) parseExtended(payload []byte) error {
 	canvasWidth++
 	canvasHeight := int(vp8x.Data[7]) | int(vp8x.Data[8])<<8 | int(vp8x.Data[9])<<16
 	canvasHeight++
+	// Same canvas area limit as the container parser used by webp.Decode.
+	if uint64(canvasWidth)*uint64(canvasHeight) >= container.MaxImageArea {
+		return fmt.Errorf("%w: canvas %dx%d too large", ErrInvalidVP8X, canvasWidth, canvasHeight)
+	}
 
 	d.features = Features{
 		Width:        canvasWidth,
