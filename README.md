@@ -223,33 +223,33 @@ gwebp info photo.webp
 
 ## Performance
 
-Benchmarked on Apple M5 Max (macOS, arm64), Go 1.27.0, `GOMAXPROCS=18`, on 2026-11-10 at `v1.2.8-7-g9940329` (`9940329`). Source: `testdata/test_color.png`, 1536x1024. Values are medians of 10 runs using the default 1-second benchmark duration.
+Benchmarked on Apple M5 Max (macOS, arm64), Go 1.27.0, `GOMAXPROCS=18`, on 2026-11-10 at `v1.2.8-13-gb0f8d34` (`b0f8d34`). Source: `testdata/test_color.png`, 1536x1024. Values are medians of 10 runs using the default 1-second benchmark duration.
 
 ### Encode (1536x1024, Quality 75 for lossy)
 
 | Library | Mode | Time | MB/s | B/op | Allocs |
 |---------|------|-----:|-----:|-----:|-------:|
-| **deepteams/webp** (Pure Go) | Lossy | 51.3 ms | 3.77 | 1.28 MB | 165 |
-| gen2brain/webp (WASM) | Lossy | 57.7 ms | 4.38 | 12.9 KB | 12 |
-| chai2010/webp (CGo) | Lossy | 77.5 ms | 2.70 | 228.4 KB | 4 |
-| **deepteams/webp** (Pure Go) | Lossless | 118.0 ms | 15.50 | 21.04 MB | 1,177 |
-| gen2brain/webp (WASM) | Lossless | 186.7 ms | 11.00 | 342.9 KB | 12 |
-| nativewebp (Pure Go) | Lossless | 283.8 ms | 7.08 | 89.29 MB | 2,155 |
-| chai2010/webp (CGo) | Lossless | 951.8 ms | 1.84 | 2.63 MB | 4 |
+| **deepteams/webp** (Pure Go) | Lossy | 48.8 ms | 3.96 | 1.26 MB | 176 |
+| gen2brain/webp (WASM) | Lossy | 56.0 ms | 4.51 | 12.9 KB | 12 |
+| chai2010/webp (CGo) | Lossy | 74.0 ms | 2.83 | 227.4 KB | 4 |
+| **deepteams/webp** (Pure Go) | Lossless | 118.1 ms | 15.47 | 21.04 MB | 1,177 |
+| gen2brain/webp (WASM) | Lossless | 197.8 ms | 10.39 | 342.9 KB | 12 |
+| nativewebp (Pure Go) | Lossless | 282.1 ms | 7.13 | 89.29 MB | 2,155 |
+| chai2010/webp (CGo) | Lossless | 930.1 ms | 1.88 | 2.63 MB | 4 |
 
 ### Decode (1536x1024)
 
 | Library | Mode | Time | MB/s | B/op | Allocs |
 |---------|------|-----:|-----:|-----:|-------:|
-| chai2010/webp (CGo) | Lossy | 9.59 ms | 21.80 | 6.76 MB | 23 |
-| **deepteams/webp** (Pure Go) | Lossy | 11.2 ms | 17.32 | 6.51 MB | 7 |
-| golang.org/x/image/webp | Lossy | 18.9 ms | 10.23 | 2.59 MB | 13 |
-| gen2brain/webp (WASM) | Lossy | 22.6 ms | 11.21 | 622.1 KB | 40 |
-| **deepteams/webp** (Pure Go) | Lossless | 17.6 ms | 104.08 | 8.67 MB | 225 |
-| chai2010/webp (CGo) | Lossless | 19.4 ms | 90.44 | 10.65 MB | 30 |
-| gen2brain/webp (WASM) | Lossless | 34.5 ms | 59.59 | 4.66 MB | 46 |
-| nativewebp (Pure Go) | Lossless | 37.8 ms | 53.22 | 6.35 MB | 50 |
-| golang.org/x/image/webp | Lossless | 40.1 ms | 45.62 | 7.14 MB | 966 |
+| chai2010/webp (CGo) | Lossy | 9.72 ms | 21.52 | 6.76 MB | 23 |
+| **deepteams/webp** (Pure Go) | Lossy | 10.9 ms | 17.66 | 6.51 MB | 7 |
+| golang.org/x/image/webp | Lossy | 18.7 ms | 10.36 | 2.59 MB | 13 |
+| gen2brain/webp (WASM) | Lossy | 22.8 ms | 11.07 | 622.1 KB | 40 |
+| **deepteams/webp** (Pure Go) | Lossless | 18.0 ms | 101.79 | 8.64 MB | 225 |
+| chai2010/webp (CGo) | Lossless | 19.5 ms | 89.96 | 10.65 MB | 30 |
+| gen2brain/webp (WASM) | Lossless | 34.9 ms | 58.85 | 4.66 MB | 46 |
+| nativewebp (Pure Go) | Lossless | 36.6 ms | 54.98 | 6.35 MB | 50 |
+| golang.org/x/image/webp | Lossless | 40.3 ms | 45.39 | 7.14 MB | 966 |
 
 These results describe this image and the benchmark's existing settings. `MB/s` uses compressed bytes, not decoded pixels; `B/op` and allocation counts cover Go heap allocations, not total native/WASM memory. Decoder inputs and output color models differ between libraries, so timings are not a comparison of identical work. In particular, deepteams/webp now returns range-correct `*image.NRGBA` for lossy images; older YCbCr decode timings are not equivalent.
 
