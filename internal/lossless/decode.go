@@ -36,6 +36,11 @@ func acquireDecoder() *Decoder {
 	return &Decoder{}
 }
 
+// maxPooledPixels caps the pixel buffer kept in the decoder pool (64 MiB).
+// Larger buffers are dropped so one huge image does not stay pinned in
+// memory after its decode.
+const maxPooledPixels = 1 << 24
+
 // releaseDecoder returns a Decoder to the pool for reuse.
 func releaseDecoder(dec *Decoder) {
 	if dec == nil {
@@ -47,7 +52,10 @@ func releaseDecoder(dec *Decoder) {
 	dec.hdr.htreeGroups = nil
 	dec.hdr.huffmanImage = nil
 	dec.hdr.colorCache = nil
-	// Keep pixels, transformBuf, and huffScratch for reuse.
+	if cap(dec.pixels) > maxPooledPixels {
+		dec.pixels = nil
+	}
+	// Keep pixels (up to maxPooledPixels) and huffScratch for reuse.
 	losslessDecoderPool.Put(dec)
 }
 
@@ -77,8 +85,6 @@ type Decoder struct {
 	pixels []uint32
 	// Scratch cache for applying inverse transforms.
 	argbCache []uint32
-	// Reusable buffer for applyInverseTransforms output (pooled).
-	transformBuf []uint32
 
 	// Huffman metadata for the current image level.
 	hdr metadata
@@ -177,13 +183,6 @@ func DecodeVP8LReuse(data []byte, reuse *image.NRGBA) (*image.NRGBA, error) {
 		dec.pixels = make([]uint32, needed)
 	}
 	dec.argbCache = dec.pixels[numAlloc+dec.Width:]
-
-	// Reuse transform output buffer if large enough.
-	if cap(dec.transformBuf) >= numAlloc {
-		dec.transformBuf = dec.transformBuf[:numAlloc]
-	} else {
-		dec.transformBuf = make([]uint32, numAlloc)
-	}
 
 	// Decode the entropy-coded image data using the transform width.
 	if err := dec.decodeImageData(dec.pixels[:numPixTrans], tw, dec.Height, dec.Height); err != nil {

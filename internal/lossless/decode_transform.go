@@ -129,27 +129,16 @@ func bytesToARGBSlice(b []uint8, s []uint32) {
 	}
 }
 
-// applyInverseTransforms applies all transforms in reverse order and
-// returns the final pixel buffer.
+// applyInverseTransforms applies all transforms in reverse order, in place,
+// and returns the final pixel buffer. Every inverse transform supports
+// in == out (the colour-indexing one moves its packed input out of the way
+// first), so no second full-image buffer is needed, as in libwebp.
 func (dec *Decoder) applyInverseTransforms(pixels []uint32) []uint32 {
-	numPix := len(pixels)
-	rows := pixels
-	out := dec.transformBuf
-	if out == nil || len(out) < numPix {
-		out = make([]uint32, numPix)
-	}
-
 	for n := dec.nextTransform - 1; n >= 0; n-- {
 		t := &dec.transforms[n]
-		inverseTransform(t, 0, t.YSize, rows, out)
-		rows = out
+		inverseTransform(t, 0, t.YSize, pixels, pixels)
 	}
-
-	if dec.nextTransform == 0 {
-		// No transforms: output is the original pixels.
-		return pixels
-	}
-	return out[:numPix]
+	return pixels
 }
 
 // inverseTransform applies a single inverse transform to the pixel data.
