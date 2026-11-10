@@ -622,6 +622,21 @@ func colorIndexInverseTransform(t *Transform, yStart, yEnd int, src, dst []uint3
 		countMask := pixelsPerByte - 1
 		bitMask := uint32((1 << bitsPerPixel) - 1)
 
+		// When the transform runs in place (src and dst share storage, which
+		// happens whenever it is not the first inverse transform), unpacking
+		// writes pixels faster than it reads packed indices and would
+		// overwrite indices not yet consumed. As libwebp does
+		// (VP8LInverseTransform), first move the packed rows to the end of
+		// the output area so the read cursor always stays ahead of the
+		// write cursor.
+		if len(src) > 0 && len(dst) > 0 && &src[0] == &dst[0] {
+			numRows := yEnd - yStart
+			packedLen := numRows * ((width + countMask) >> t.Bits)
+			end := numRows * width
+			copy(dst[end-packedLen:end], src[:packedLen])
+			src = dst[end-packedLen : end]
+		}
+
 		srcOff := 0
 		dstOff := 0
 		for y := yStart; y < yEnd; y++ {
