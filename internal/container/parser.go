@@ -232,9 +232,9 @@ func (p *Parser) parseVP8XChunks(buf []byte) error {
 			if err != nil {
 				return err
 			}
-			// The frame must lie entirely within the canvas, otherwise the
-			// canvas size reported by DecodeConfig would not bound the
-			// decoded image size.
+			// The frame (sized by its bitstream) must lie entirely within
+			// the canvas, otherwise the canvas size reported by
+			// DecodeConfig would not bound the decoded image size.
 			if uint64(frame.XOffset)+uint64(frame.Width) > uint64(p.features.CanvasWidth) ||
 				uint64(frame.YOffset)+uint64(frame.Height) > uint64(p.features.CanvasHeight) {
 				return fmt.Errorf("%w: frame exceeds canvas", ErrInvalidImage)
@@ -438,9 +438,9 @@ func parseFrameSubChunks(frame FrameInfo, buf []byte) (FrameInfo, error) {
 			if err != nil {
 				return FrameInfo{}, err
 			}
-			if w != frame.Width || h != frame.Height {
-				return FrameInfo{}, fmt.Errorf("%w: VP8L size %dx%d does not match ANMF size %dx%d", ErrInvalidImage, w, h, frame.Width, frame.Height)
-			}
+			// Like libwebp's demuxer, the frame size is the bitstream
+			// size; the caller bounds it by the canvas.
+			frame.Width, frame.Height = w, h
 			frame.IsLossless = true
 			if alpha {
 				frame.HasAlpha = true
@@ -453,9 +453,9 @@ func parseFrameSubChunks(frame FrameInfo, buf []byte) (FrameInfo, error) {
 			if err != nil {
 				return FrameInfo{}, err
 			}
-			if w != frame.Width || h != frame.Height {
-				return FrameInfo{}, fmt.Errorf("%w: VP8 size %dx%d does not match ANMF size %dx%d", ErrInvalidImage, w, h, frame.Width, frame.Height)
-			}
+			// Like libwebp's demuxer, the frame size is the bitstream
+			// size; the caller bounds it by the canvas.
+			frame.Width, frame.Height = w, h
 			frame.IsLossless = false
 			frame.Payload = payload
 			frame.AlphaData = alphPayload
@@ -473,6 +473,19 @@ func parseFrameSubChunks(frame FrameInfo, buf []byte) (FrameInfo, error) {
 		return FrameInfo{}, ErrInvalidChunk
 	}
 	return frame, nil
+}
+
+// BitstreamSize returns the image dimensions declared by a VP8 or VP8L
+// bitstream header. fourcc selects the codec (FourCCVP8 or FourCCVP8L).
+func BitstreamSize(fourcc uint32, data []byte) (width, height int, err error) {
+	switch fourcc {
+	case FourCCVP8:
+		return parseVP8Header(data)
+	case FourCCVP8L:
+		width, height, _, err = parseVP8LHeader(data)
+		return width, height, err
+	}
+	return 0, 0, ErrInvalidChunk
 }
 
 // parseVP8Header extracts width and height from a VP8 lossy bitstream header.
