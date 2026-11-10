@@ -1128,8 +1128,13 @@ func extractSubImage(src *image.NRGBA, rect image.Rectangle) *image.NRGBA {
 
 // cloneNRGBA creates a deep copy of an NRGBA image.
 func cloneNRGBA(src *image.NRGBA) *image.NRGBA {
-	dst := image.NewNRGBA(src.Bounds())
-	copy(dst.Pix, src.Pix)
+	b := src.Bounds()
+	dst := image.NewNRGBA(b)
+	rowBytes := 4 * b.Dx()
+	for y := 0; y < b.Dy(); y++ {
+		off := src.PixOffset(b.Min.X, b.Min.Y+y)
+		copy(dst.Pix[y*dst.Stride:y*dst.Stride+rowBytes], src.Pix[off:off+rowBytes])
+	}
 	return dst
 }
 

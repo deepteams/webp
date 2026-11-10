@@ -97,10 +97,24 @@ func (f *Frame) HasImage() bool {
 	return f.Image != nil
 }
 
-// toNRGBA converts any image.Image to *image.NRGBA.
+// toNRGBA converts any image.Image to a compact *image.NRGBA whose bounds
+// start at (0,0) and whose stride is exactly 4*width. Callers index Pix
+// with those assumptions, so an *image.NRGBA that is a SubImage (non-zero
+// origin, parent stride, Pix extending into the parent) is copied: using
+// it directly would read pixels outside the sub-image.
 func toNRGBA(src image.Image) *image.NRGBA {
 	if nrgba, ok := src.(*image.NRGBA); ok {
-		return nrgba
+		b := nrgba.Bounds()
+		w, h := b.Dx(), b.Dy()
+		if b.Min == (image.Point{}) && nrgba.Stride == 4*w && len(nrgba.Pix) == 4*w*h {
+			return nrgba
+		}
+		dst := image.NewNRGBA(image.Rect(0, 0, w, h))
+		for y := 0; y < h; y++ {
+			off := nrgba.PixOffset(b.Min.X, b.Min.Y+y)
+			copy(dst.Pix[y*dst.Stride:(y+1)*dst.Stride], nrgba.Pix[off:off+4*w])
+		}
+		return dst
 	}
 	b := src.Bounds()
 	dst := image.NewNRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
